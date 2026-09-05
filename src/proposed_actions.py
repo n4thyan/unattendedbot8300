@@ -7,7 +7,7 @@ for human review before execution.
 
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -49,9 +49,12 @@ class ProposedAction:
     @classmethod
     def from_db_row(cls, row: dict) -> "ProposedAction":
         """Create from database row."""
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
         return cls(
             action_type=row["action_type"],
-            payload=row["payload"],
+            payload=payload,
             target_fb_object=row.get("target_fb_object"),
             reason=row.get("reason", ""),
             safety_result=json.loads(row["safety_result"]) if row.get("safety_result") else None,
@@ -78,7 +81,7 @@ class ProposedActionQueue:
                 target_fb_object: Optional[str] = None,
                 reason: str = "") -> int:
         """Propose a new action and return its ID."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         cur = self._conn.execute("""
             INSERT INTO proposed_actions 
@@ -158,7 +161,7 @@ class ProposedActionQueue:
     
     def approve(self, action_id: int, approved_by: str = "admin") -> bool:
         """Approve a proposed action."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         result = self._conn.execute("""
             UPDATE proposed_actions 
             SET status = 'approved', approved_at = ?, approved_by = ?
@@ -180,7 +183,7 @@ class ProposedActionQueue:
     def execute(self, action_id: int, result_on_success: Optional[str] = None,
                 error: Optional[str] = None) -> bool:
         """Mark an action as executed (called after actual Facebook API call)."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         status = "failed" if error else "executed"
         result = self._conn.execute("""
             UPDATE proposed_actions 
@@ -193,10 +196,21 @@ class ProposedActionQueue:
     def clear_executed(self, older_than_days: int = 30) -> int:
         """Clear executed/failed actions older than specified days."""
         from datetime import timedelta
-        cutoff = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
         result = self._conn.execute("""
             DELETE FROM proposed_actions 
             WHERE status IN ('executed', 'failed') AND created_at < ?
         """, (cutoff,))
         self._conn.commit()
         return result.rowcount
+
+
+# === Helper to get payload ---
+
+def get_action_payload(conn: sqlite3.Connection, action_id: int) -> Optional[dict]:
+    """Get the payload for a specific action."""
+    cur = conn.execute("SELECT payload FROM proposed_actions WHERE id = ?", (action_id,))
+    row = cur.fetchone()
+    if row and row["payload"]:
+        return json.loads(row["payload"])
+    return None

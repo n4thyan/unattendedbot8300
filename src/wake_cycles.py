@@ -6,7 +6,7 @@ Records each wake cycle for observability and debugging.
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import sqlite3
@@ -47,7 +47,7 @@ class WakeCycleLogger:
     
     def start(self, observation_summary: str = "") -> int:
         """Start a new wake cycle and return its ID."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cur = self._conn.execute("""
             INSERT INTO wake_cycles (started_at, observation_summary)
             VALUES (?, ?)
@@ -60,7 +60,7 @@ class WakeCycleLogger:
                  decision_summary: str = "",
                  error: Optional[str] = None) -> None:
         """Complete a wake cycle."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         self._conn.execute("""
             UPDATE wake_cycles 
             SET completed_at = ?, decision = ?, proposed_action_id = ?, 
@@ -74,7 +74,7 @@ class WakeCycleLogger:
                decision_summary: str = "",
                error: Optional[str] = None) -> WakeCycle:
         """Record a complete wake cycle."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         cur = self._conn.execute("""
             INSERT INTO wake_cycles 
             (started_at, completed_at, observation_summary, decision, 
@@ -108,7 +108,7 @@ class WakeCycleLogger:
         """Get wake cycles by decision type."""
         cur = self._conn.execute("""
             SELECT * FROM wake_cycles 
-            WHERE decision = ?
+            WHERE decision = ? 
             ORDER BY started_at DESC
         """, (decision,))
         return [WakeCycle.from_db_row(dict(row)) for row in cur.fetchall()]

@@ -2,23 +2,36 @@
 Memory storage and retrieval layer for UnattendedBot8300.
 
 Manages persistent memories that help the agent develop personality
-and remember important interactions.
+and remember important interactions. Enhanced with relevance scoring.
 """
 
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from typing import Optional
 
 import sqlite3
 
 from .storage import (
-    get_memories, store_memory, search_memories as _search_memories_db,
+    get_memories, store_memory as _store_memory_db, search_memories as _search_memories_db,
     get_short_term, set_short_term as _set_short_term_db
 )
 
 
 class MemoryStore:
-    """High-level memory interface for the agent."""
+    """
+    High-level memory interface for the agent.
+    
+    Supports continuity for:
+    - Page lore
+    - Previous public interactions
+    - Recurring jokes
+    - Interests that emerge
+    - Likes/dislikes
+    - Notable failures/successes
+    - Reflections
+    - Recurring commenters (based only on their public interactions)
+    """
     
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
@@ -27,7 +40,7 @@ class MemoryStore:
     
     def remember(self, kind: str, content: str, tags: Optional[list[str]] = None) -> int:
         """Store a new memory."""
-        return store_memory(self._conn, kind, content, tags)
+        return _store_memory_db(self._conn, kind, content, tags)
     
     def recall(self, kind: Optional[str] = None, limit: int = 100) -> list[dict]:
         """Recall memories, optionally filtered by kind."""
@@ -36,6 +49,75 @@ class MemoryStore:
     def search(self, query: str, limit: int = 50) -> list[dict]:
         """Search memories by content."""
         return _search_memories_db(self._conn, query, limit)
+    
+    # === Enhanced Memory Retrieval ===
+    
+    def get_relevant_memories(self, query: str, max_items: int = 5) -> list[dict]:
+        """
+        Get memories relevant to a query using multiple signals:
+        - Tags
+        - Keyword overlap
+        - Recency
+        - Importance/kind
+        """
+        # Get candidate memories
+        candidate_memories = get_memories(self._conn, limit=max_items * 3)
+        
+        if not candidate_memories:
+            return []
+        
+        # Score memories
+        scored = []
+        query_lower = query.lower()
+        query_words = set(w for w in query_lower.split() if len(w) > 2)
+        
+        for mem in candidate_memories:
+            score = 0
+            content = mem.get("content", "").lower()
+            tags_str = mem.get("tags", "") or ""
+            tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+            kind = mem.get("kind", "")
+            
+            # Keyword overlap in content (weighted)
+            content_words = set(w for w in content.split() if len(w) > 2)
+            overlap = query_words & content_words
+            score += len(overlap) * 3
+            
+            # Tag matching (weighted higher)
+            tag_words = set(t.lower() for t in tags)
+            if query_words & tag_words:
+                score += 5
+            if tag_words & set(t.lower() for t in tags):
+                score += 2
+            
+            # Recency decay (newer = more relevant)
+            try:
+                created = datetime.fromisoformat(
+                    mem.get("created_at", "").replace("Z", "+00:00")
+                )
+                age_hours = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+                score -= age_hours / 24  # Decay 1 point per day
+            except Exception:
+                score += 1  # Penalize entries we can't parse dates for
+            
+            # Kind weighting
+            if kind == "lore":
+                score += 3
+            elif kind == "event":
+                score += 2
+            elif kind == "reflection":
+                score += 1.5
+            elif kind == "liking":
+                score += 1
+            elif kind == "dislike":
+                score += 0.5
+            
+            scored.append((score, mem))
+        
+        # Sort by score descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+        
+        return [mem for _, mem in scored[:max_items]]
     
     # === Convenience Methods for Common Kinds ===
     
@@ -103,13 +185,65 @@ class MemoryStore:
                 lines.append(f"  - From {from_name}: {msg}")
         return "\n".join(lines)
     
-    def get_relevant_memories(self, query: str, max_items: int = 5) -> str:
+    def get_relevant_memories_for_context(self, query: str, max_items: int = 5) -> str:
         """Get memories relevant to a query, formatted for context."""
-        memories = self.search(query, limit=max_items)
+        memories = self.get_relevant_memories(query, max_items)
         if not memories:
             return ""
         
         lines = ["Relevant memories:"]
         for mem in memories[:max_items]:
-            lines.append(f"  - {mem.get('content', '')[:100]}")
+            content = mem.get('content', '')[:100]
+            lines.append(f"  - {content}")
         return "\n".join(lines)
+    
+    def get_memories_by_kind(self, kind: str, limit: int = 50) -> list[dict]:
+        """Get memories by kind category."""
+        return get_memories(self._conn, kind=kind, limit=limit)
+    
+    def get_memories_by_tags(self, tags: list[str], limit: int = 50) -> list[dict]:
+        """Get memories that have any of the specified tags."""
+        all_memories = get_memories(self._conn, limit=limit * 3)
+        result = []
+        
+        for mem in all_memories:
+            mem_tags_str = mem.get("tags", "") or ""
+            mem_tags = set(t.strip().lower() for t in mem_tags_str.split(","))
+            query_tags = set(t.lower() for t in tags)
+            
+            if mem_tags & query_tags:
+                result.append(mem)
+                if len(result) >= limit:
+                    break
+        
+        return result
+    
+    def update_memory(self, memory_id: int, content: Optional[str] = None,
+                      tags: Optional[list[str]] = None) -> bool:
+        """Update a memory's content or tags."""
+        now = datetime.now(timezone.utc).isoformat()
+        
+        updates = []
+        params = []
+        
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(",".join(tags))
+        
+        updates.append("last_seen = ?")
+        params.append(now)
+        
+        params.append(memory_id)
+        
+        if not updates:
+            return False
+        
+        query = f"UPDATE memories SET {', '.join(updates)} WHERE id = ?"
+        result = self._conn.execute(query, params)
+        self._conn.commit()
+        
+        return result.rowcount > 0

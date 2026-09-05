@@ -6,7 +6,7 @@ Single source of truth for all persistent data.
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -160,7 +160,6 @@ def store_fb_posts(conn: sqlite3.Connection, posts: list[dict]) -> None:
         conn.rollback()
         raise
 
-
 def get_fb_posts(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
     """Retrieve recent Facebook posts."""
     cur = conn.execute("""
@@ -169,7 +168,6 @@ def get_fb_posts(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
         LIMIT ?
     """, (limit,))
     return [dict(row) for row in cur.fetchall()]
-
 
 def get_fb_post(conn: sqlite3.Connection, fb_post_id: str) -> Optional[dict]:
     """Retrieve a specific Facebook post."""
@@ -204,7 +202,6 @@ def store_fb_comments(conn: sqlite3.Connection, comments: list[dict]) -> None:
         conn.rollback()
         raise
 
-
 def get_comments_for_post(conn: sqlite3.Connection, fb_post_id: str) -> list[dict]:
     """Get all comments for a specific post."""
     cur = conn.execute("""
@@ -213,7 +210,6 @@ def get_comments_for_post(conn: sqlite3.Connection, fb_post_id: str) -> list[dic
         ORDER BY created_time ASC
     """, (fb_post_id,))
     return [dict(row) for row in cur.fetchall()]
-
 
 def get_unreplied_comments(conn: sqlite3.Connection) -> list[dict]:
     """Get comments that don't have bot replies yet."""
@@ -231,14 +227,13 @@ def get_unreplied_comments(conn: sqlite3.Connection) -> list[dict]:
 def store_memory(conn: sqlite3.Connection, kind: str, content: str, 
                  tags: Optional[list[str]] = None) -> int:
     """Store a new memory and return its ID."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute("""
         INSERT INTO memories (kind, content, created_at, last_seen, tags)
         VALUES (?, ?, ?, ?, ?)
     """, (kind, content, now, now, ",".join(tags) if tags else None))
     conn.commit()
     return cur.lastrowid
-
 
 def get_memories(conn: sqlite3.Connection, kind: Optional[str] = None,
                  limit: int = 100) -> list[dict]:
@@ -258,7 +253,6 @@ def get_memories(conn: sqlite3.Connection, kind: Optional[str] = None,
         """, (limit,))
     return [dict(row) for row in cur.fetchall()]
 
-
 def search_memories(conn: sqlite3.Connection, query: str, limit: int = 50) -> list[dict]:
     """Search memories by content."""
     cur = conn.execute("""
@@ -274,7 +268,7 @@ def search_memories(conn: sqlite3.Connection, query: str, limit: int = 50) -> li
 
 def get_short_term(conn: sqlite3.Connection, key: str) -> Optional[str]:
     """Get a short-term value if not expired."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
         "SELECT value FROM short_term WHERE id = ? AND (expires_at IS NULL OR expires_at > ?)",
         (key, now)
@@ -282,14 +276,12 @@ def get_short_term(conn: sqlite3.Connection, key: str) -> Optional[str]:
     row = cur.fetchone()
     return row["value"] if row else None
 
-
 def set_short_term(conn: sqlite3.Connection, key: str, value: str,
                    ttl_seconds: Optional[int] = None) -> None:
     """Set a short-term value with optional TTL."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = None
     if ttl_seconds:
-        from datetime import timedelta
         expires_at = (now + timedelta(seconds=ttl_seconds)).isoformat()
     
     conn.execute("""
@@ -299,13 +291,40 @@ def set_short_term(conn: sqlite3.Connection, key: str, value: str,
     conn.commit()
 
 
+def get_all_short_term(conn: sqlite3.Connection) -> dict[str, str]:
+    """Get all non-expired short-term key-value pairs."""
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "SELECT id, value FROM short_term WHERE (expires_at IS NULL OR expires_at > ?)",
+        (now,)
+    )
+    return {row["id"]: row["value"] for row in cur.fetchall()}
+
+
+# === Configuration Helpers ===
+
+def get_config_value(conn: sqlite3.Connection, key: str) -> Optional[str]:
+    """Get a configuration override value."""
+    cur = conn.execute("SELECT value FROM config WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else None
+
+def set_config_value(conn: sqlite3.Connection, key: str, value: str) -> None:
+    """Set a configuration override value."""
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        (key, value)
+    )
+    conn.commit()
+
+
 # --- Proposed Actions ---
 
 def create_proposed_action(conn: sqlite3.Connection, action_type: str,
                            payload: dict, target_fb_object: Optional[str] = None,
                            reason: str = "") -> int:
     """Create a proposed action and return its ID."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute("""
         INSERT INTO proposed_actions 
         (action_type, payload, target_fb_object, reason, created_at, status)
@@ -313,7 +332,6 @@ def create_proposed_action(conn: sqlite3.Connection, action_type: str,
     """, (action_type, json.dumps(payload), target_fb_object, reason, now))
     conn.commit()
     return cur.lastrowid
-
 
 def get_proposed_actions(conn: sqlite3.Connection, status: Optional[str] = None) -> list[dict]:
     """Get proposed actions by status."""
@@ -330,18 +348,16 @@ def get_proposed_actions(conn: sqlite3.Connection, status: Optional[str] = None)
         """)
     return [dict(row) for row in cur.fetchall()]
 
-
 def approve_action(conn: sqlite3.Connection, action_id: int, 
                    approved_by: str = "admin") -> None:
     """Approve a proposed action."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute("""
         UPDATE proposed_actions 
         SET status = 'approved', approved_at = ?, approved_by = ?
         WHERE id = ? AND status = 'proposed'
     """, (now, approved_by, action_id))
     conn.commit()
-
 
 def reject_action(conn: sqlite3.Connection, action_id: int) -> None:
     """Reject a proposed action."""
@@ -352,11 +368,10 @@ def reject_action(conn: sqlite3.Connection, action_id: int) -> None:
     """, (action_id,))
     conn.commit()
 
-
 def mark_executed(conn: sqlite3.Connection, action_id: int, 
                   fb_result_id: Optional[str] = None, error: Optional[str] = None) -> None:
     """Mark an action as executed (from approved)."""
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     status = "failed" if error else "executed"
     conn.execute("""
         UPDATE proposed_actions 
@@ -371,7 +386,7 @@ def mark_executed(conn: sqlite3.Connection, action_id: int,
 def check_rate_limit(conn: sqlite3.Connection, key: str, 
                      window_seconds: int, limit: int) -> bool:
     """Check if we're within rate limit. Returns True if allowed."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     window_end = None
     count = 0
     
@@ -383,7 +398,6 @@ def check_rate_limit(conn: sqlite3.Connection, key: str,
             count = row["count"]
         else:
             # Window expired, reset
-            from datetime import timedelta
             window_end = (now + timedelta(seconds=window_seconds)).isoformat()
     
     if count >= limit:
@@ -391,7 +405,6 @@ def check_rate_limit(conn: sqlite3.Connection, key: str,
     
     # Increment counter
     if window_end is None:
-        from datetime import timedelta
         window_end = (now + timedelta(seconds=window_seconds)).isoformat()
     
     conn.execute("""
@@ -410,7 +423,7 @@ def record_wake_cycle(conn: sqlite3.Connection, decision: str,
                       decision_summary: str = "",
                       error: Optional[str] = None) -> int:
     """Record a wake cycle completion."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     cur = conn.execute("""
         INSERT INTO wake_cycles 
         (started_at, completed_at, observation_summary, decision, proposed_action_id, decision_summary, error)
@@ -419,7 +432,6 @@ def record_wake_cycle(conn: sqlite3.Connection, decision: str,
           proposed_action_id, decision_summary, error))
     conn.commit()
     return cur.lastrowid
-
 
 def get_wake_cycles(conn: sqlite3.Connection, limit: int = 50) -> list[dict]:
     """Get recent wake cycles."""
