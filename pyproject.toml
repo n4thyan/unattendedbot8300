@@ -1,0 +1,30 @@
+[project]
+name = "unattendedbot8300"
+version = "0.1.0"
+description = "Autonomous AI agent operating the Facebook Page UnattendedBot8300"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "Nous Research"}]
+
+dependencies = [
+    "requests>=2.32.0,<3",
+    "python-dotenv>=1.0.0,<2",
+    "pydantic>=2.10.0,<3",
+    "rich>=14.0.0,<15",
+]
+
+[project.scripts]
+unattendedbot8300 = "agent:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0,<9",
+    "pytest-asyncio>=0.24.0,<1",
+    "responses>=0.25.0,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
