@@ -33,3 +33,26 @@ Thumbs.db
 # Hermes project-local
 .hermes/
 config.yaml
+
+# Tokens and credentials
+tokens/
+secrets/
+auth.json
+credential*
+*.pem
+*.key
+
+# Hermes state directory (home expansion)
+.hermes/state.db
+.hermes/sessions/
+.hermes/logs/
+.hermes/auth.json
+
+# Python cache in any location
+**/__pycache__/
+**/*.pyc
+
+# Coverage reports
+.coverage
+htmlcov/
+.pytest_cache/
