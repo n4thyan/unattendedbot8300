@@ -51,6 +51,9 @@ class DecisionModel(BaseModel):
     # Optional memory candidates for future reference
     suggested_memory_ids: Optional[list[int]] = Field(default=None, description="Suggested memory IDs to reference")
     
+    # Safety result metadata (populated after safety check)
+    safety_result: Optional[dict[str, Any]] = Field(default=None, description="Safety check result")
+    
     @field_validator('message')
     @classmethod
     def validate_message(cls, v: Optional[str], info) -> Optional[str]:

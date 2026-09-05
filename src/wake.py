@@ -232,7 +232,7 @@ class WakeOrchestrator:
             # Simple heuristic: if we have unread comments and no pending replies, propose one
             action_queue = ProposedActionQueue(conn)
             pending_replies = [a for a in action_queue.get_pending() 
-                              if a.get("action_type") == "REPLY"]
+                              if a.action_type == "REPLY"]
             
             if not pending_replies and self.config.is_approval_mode():
                 # Propose a reply in approval mode
