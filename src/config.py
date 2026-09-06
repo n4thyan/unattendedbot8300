@@ -16,20 +16,30 @@ from dotenv import load_dotenv
 class Config:
     """Configuration settings for the agent."""
     
-    # Facebook API settings
+    # Facebook API settings (used when FACEBOOK_TRANSPORT=graph_api)
     facebook_page_id: str = ""
     facebook_page_access_token: str = ""
     facebook_app_id: str = ""
     facebook_app_secret: str = ""
     facebook_graph_api_version: str = "v26.0"
-
+    
+    # Facebook UI transport configuration (Camoufox browser UI transport)
+    # These identify the target Page by URL/slug — NOT the numeric Graph API
+    # Page ID.  The numeric FACEBOOK_PAGE_ID above is only for graph_api.
+    facebook_page_url: str = "https://www.facebook.com/UnattendedBot8300"
+    facebook_page_slug: str = "UnattendedBot8300"
+    
     # Facebook transport selection
     #   graph_api   — official Meta Graph API (dormant during development)
     #   camoufox_ui — Camoufox browser UI transport (active experimental transport)
     facebook_transport: str = "camoufox_ui"
-
+    
     # Camoufox browser profile (persistent authenticated session)
     camoufox_profile_dir: str = "data/browser-profile"
+    
+    # 2captcha API key (optional, for automated CAPTCHA solving).
+    # Stored locally only — never committed to the repo.
+    twocaptcha_api_key: str = ""
     
     # Agent modes
     unattended_bot_mode: str = "dry_run"  # dry_run or live
@@ -123,6 +133,15 @@ def load_config(env_path: Optional[Path] = None) -> Config:
     # Facebook transport
     config.facebook_transport = os.getenv("FACEBOOK_TRANSPORT", "camoufox_ui")
     config.camoufox_profile_dir = os.getenv("CAMOUFOX_PROFILE_DIR", "data/browser-profile")
+    
+    # Facebook UI transport Page identity (URL/slug — not the numeric Graph API ID)
+    config.facebook_page_url = os.getenv(
+        "FACEBOOK_PAGE_URL", "https://www.facebook.com/UnattendedBot8300"
+    )
+    config.facebook_page_slug = os.getenv("FACEBOOK_PAGE_SLUG", "UnattendedBot8300")
+    
+    # 2captcha API key (optional automated CAPTCHA solving)
+    config.twocaptcha_api_key = os.getenv("TWOCAPTCHA_API_KEY", "")
     
     # Agent modes
     config.unattended_bot_mode = os.getenv("UNATTENDED_BOT_MODE", "dry_run")

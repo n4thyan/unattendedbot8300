@@ -204,6 +204,14 @@ project config, source code, environment variables, or automation scripts.
 The user's existing Chrome session is never reused — Camoufox uses its own
 isolated profile.
 
+**Authentication detection is deterministic:** The transport does NOT assume
+the browser is authenticated merely because cookies exist. It inspects the
+rendered Facebook UI for positive authenticated evidence (profile menu,
+home link, feed composer, Watch/Reels links). If a login form (email input +
+password input + login button) is visible, the state is `LOGIN_REQUIRED`
+regardless of cookie count. This fixes a real bug where a cookie's presence
+was incorrectly treated as proof of authentication.
+
 #### Manual Login Flow
 
 ```bash
@@ -218,8 +226,14 @@ complete any 2FA, then the session persists for future launches.
 
 The Camoufox transport provides read-only observation:
 - Opens Facebook
-- Verifies logged-in state
-- Navigates to the UnattendedBot8300 Page
+- Deterministically establishes authentication state via UI detection
+  (NOT via cookie count)
+- If logged out, leaves the browser open for manual login (`HUMAN_LOGIN_REQUIRED`)
+- Verifies authenticated state (positive UI evidence required)
+- Inspects the Facebook Page/profile switcher
+- Switches to the UnattendedBot8300 Page identity (fail-closed)
+- Positively verifies active identity is the Page, not the personal profile
+- Navigates to the UnattendedBot8300 Page URL (`FACEBOOK_PAGE_URL`)
 - Identifies the correct Page (via ARIA headings / accessible names)
 - Reads recent posts (`div[role='article']` → PostObservation)
 - Reads visible comments (→ CommentObservation)
@@ -241,6 +255,14 @@ functions but are **stubbed** during this phase. They:
 - Raise `NotImplementedError` in `live` mode (UI automation not yet wired)
 - Are NEVER called automatically — only through the approval queue
 
+**Fail-closed identity verification:** Before any future Facebook write, the
+transport's mandatory preflight verifies:
+1. Authentication state is positively `AUTHENTICATED` (via UI evidence, not cookies)
+2. Active identity == UnattendedBot8300 Page (via `verify_page_identity()`)
+
+If either check fails, the write is blocked with a `TransportError`. The bot
+will NEVER accidentally publish to the personal account.
+
 The flow for future writes:
 ```
 Model decision → DecisionModel validation → SafetyPolicy → RateLimit → ProposedAction → Approval → transport executor
@@ -259,6 +281,15 @@ All selectors are centralized in the `SELECTORS` dict in `src/facebook_camoufox.
 Explicit waits (`wait_for_selector`, `wait_for_load_state`) with timeouts are used
 instead of fixed `sleep()` calls.
 
+Selectors are calibrated for four categories:
+- **Auth state** — login form (email+password+button) vs authenticated UI (profile menu, home link, composer)
+- **Page identity** — h1 heading, URL path, profile link href, active identity label
+- **Posts** — `role='article'` containers, post message text, permalinks, timestamps
+- **Comments** — comment body text, commenter display names
+
+Dormant 2captcha integration is available for CAPTCHA challenges (see
+`TWOCAPTCHA_API_KEY` in `.env.example`).
+
 #### Error Handling
 
 Camoufox failures are classified into specific error types:
@@ -267,7 +298,20 @@ Camoufox failures are classified into specific error types:
 - `SelectorError` — UI element selector didn't match (layout changed)
 - `CheckpointError` — Facebook security checkpoint (needs manual resolution)
 - `NavigationError` — URL navigation failed or timed out
-- `TransportError` — Generic transport failure
+- `TransportError` — Generic transport failure; also used to block writes when
+  authentication or identity verification fails (fail-closed)
+
+Authentication state is deterministically detected as one of:
+- `AUTHENTICATED` — positive authenticated UI evidence found
+- `LOGIN_REQUIRED` — login form (email + password + button) is visible
+- `CHECKPOINT_REQUIRED` — 2FA/checkpoint challenge is visible
+- `UNKNOWN_AUTH_STATE` — ambiguous state; **fails closed** (treated as not authenticated)
+
+Page identity state is verified as one of:
+- `PAGE_IDENTITY_CONFIRMED` — active identity is the UnattendedBot8300 Page
+- `PERSONAL_IDENTITY_ACTIVE` — personal profile identity is active
+- `IDENTITY_UNKNOWN` — cannot positively confirm Page identity
+- `PAGE_SWITCH_FAILED` — attempted switch to Page identity but failed
 
 Useful failures trigger a screenshot saved to
 `runtime/browser-references/failures/`. No cookies, tokens, or auth
@@ -313,6 +357,14 @@ Add to `.env`:
 FACEBOOK_PAGE_ID=your_numeric_page_id
 FACEBOOK_PAGE_ACCESS_TOKEN=your_long_lived_page_token
 FACEBOOK_GRAPH_API_VERSION=v26.0
+```
+
+For the Camoufox UI transport, the Page is identified by URL/slug, not the
+numeric Graph API ID:
+```
+FACEBOOK_TRANSPORT=camoufox_ui
+FACEBOOK_PAGE_URL=https://www.facebook.com/UnattendedBot8300
+FACEBOOK_PAGE_SLUG=UnattendedBot8300
 ```
 
 ## Hermes Integration

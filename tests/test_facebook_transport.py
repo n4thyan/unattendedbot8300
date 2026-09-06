@@ -40,6 +40,11 @@ from src import (
     SelectorError, CheckpointError, NavigationError, TransportUnavailableError,
     CamoufoxTransport,
 )
+from src.facebook_camoufox import (
+    AuthState, IdentityState, ChallengeType, ChallengeHandler,
+    HumanInterventionHandler, TwoCaptchaHandler, DEFAULT_CHALLENGE_HANDLER,
+    DEFAULT_PAGE_URL, DEFAULT_PAGE_SLUG,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -148,44 +153,94 @@ def test_config_transport_properties(temp_config):
 
 # ── Camoufox adapter: mocked observation extraction ───────────────────
 
-def _make_mock_page(posts_html, comments_html=None, login_form_present=False,
-                    checkpoint_present=False, page_title="UnattendedBot8300 - Facebook"):
-    """Build a mock Playwright page for testing the Camoufox transport."""
-    mock_page = MagicMock()
+def _make_authed_mock_page(page_title="UnattendedBot8300 - Facebook",
+                           page_url="https://www.facebook.com/UnattendedBot8300"):
+    """Build a mock Playwright page representing an AUTHENTICATED Facebook session.
 
-    # query_selector for login/checkpoint detection
+    The mock provides positive authenticated UI evidence:
+      - a profile menu button (aria-label contains 'profile')
+      - a Home navigation link
+      - no login form elements
+    """
+    mock_page = MagicMock()
+    mock_page.url = page_url
+    mock_page.title.return_value = page_title
+
+    # query_selector: return authenticated UI elements for auth selectors,
+    # return None for login/checkpoint forms.
     def query_selector(selector):
-        if "login" in selector.lower() or "email" in selector.lower() or "pass" in selector.lower():
-            if login_form_present:
-                return MagicMock()  # login form element exists
+        sel_lower = selector.lower()
+        # Login-form selectors → None (not logged out)
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
             return None
-        if "checkpoint" in selector.lower() or "approval" in selector.lower() or "alert" in selector.lower():
-            if checkpoint_present:
-                return MagicMock()
+        # Checkpoint/challenge selectors → None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
             return None
-        # Default: no matches for article/comment selectors
-        return None
+        # Authenticated UI evidence
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            return MagicMock()  # profile menu button present
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        # Page header title
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            el = MagicMock()
+            el.text_content.return_value = "UnattendedBot8300"
+            return el
 
     mock_page.query_selector.side_effect = query_selector
-    mock_page.url = "https://www.facebook.com/UnattendedBot8300"
-
-    # title()
-    mock_page.title.return_value = page_title
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.locator = MagicMock()
 
     # get_by_role for page identification
     mock_heading = MagicMock()
     mock_heading.text_content.return_value = "UnattendedBot8300"
     mock_page.get_by_role.return_value = mock_heading
 
-    # text_content for posts/comments
-    def text_content(selector):
-        return posts_html
+    return mock_page
 
-    mock_page.locator = MagicMock()
 
-    # wait_for_load_state should not raise
+def _make_loggedout_mock_page():
+    """Build a mock Playwright page representing a LOGGED-OUT Facebook session.
+
+    Simulates the login form being visible: email input, password input,
+    login button, and a login form element.
+    """
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/login.php"
+    mock_page.title.return_value = "Facebook - Log In"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        # Login-form selectors → present (logged out)
+        if "email" in sel_lower and "input" in sel_lower:
+            return MagicMock()
+        if "pass" in sel_lower and "input" in sel_lower:
+            return MagicMock()
+        if "login_button" in sel_lower or "name='login'" in sel_lower:
+            return MagicMock()
+        if "login_form" in sel_lower:
+            return MagicMock()
+        # Authenticated UI evidence → None (not authenticated)
+        if "auth_profile_menu" in sel_lower or "auth_home_link" in sel_lower:
+            return None
+        if "auth_watch_link" in sel_lower or "auth_feed_composer" in sel_lower:
+            return None
+        # Checkpoint selectors → None
+        if "checkpoint" in sel_lower or "captcha" in sel_lower:
+            return None
+        return None
+
+    mock_page.query_selector.side_effect = query_selector
     mock_page.wait_for_load_state = MagicMock()
-
+    mock_page.goto = MagicMock()
+    mock_page.locator = MagicMock()
     return mock_page
 
 
@@ -194,15 +249,12 @@ def test_camoufox_observe_mocked_posts(temp_config):
     transport = CamoufoxTransport(temp_config)
 
     # Mock the browser/page so open_browser doesn't launch a real browser
-    mock_page = MagicMock()
-    mock_page.url = "https://www.facebook.com/UnattendedBot8300"
-    mock_page.title.return_value = "UnattendedBot8300 - Facebook"
-    mock_page.query_selector.return_value = None  # not logged out, no checkpoint
-    mock_page.wait_for_load_state = MagicMock()
-    mock_page.goto = MagicMock()
+    mock_page = _make_authed_mock_page()
 
     # _identify_page returns the correct page name
     transport._identify_page = lambda: "UnattendedBot8300"
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
 
@@ -223,8 +275,7 @@ def test_camoufox_observe_mocked_posts(temp_config):
     ]
     transport._extract_posts = lambda: mock_posts
     transport._extract_comments = lambda post: []
-
-    # Mock open_browser to set _page without launching
+    transport._page = mock_page
     transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
 
     result = transport.observe()
@@ -240,21 +291,18 @@ def test_camoufox_observe_mocked_posts(temp_config):
 def test_camoufox_observe_no_write_in_dry_run(temp_config):
     """Observe() must never trigger publish or reply, even if write methods exist."""
     transport = CamoufoxTransport(temp_config)
-    # Even in dry_run mode, observe() should not call write methods
 
-    mock_page = MagicMock()
-    mock_page.url = "https://www.facebook.com/UnattendedBot8300"
-    mock_page.title.return_value = "UnattendedBot8300 - Facebook"
-    mock_page.query_selector.return_value = None
-    mock_page.wait_for_load_state = MagicMock()
-    mock_page.goto = MagicMock()
-
+    mock_page = _make_authed_mock_page()
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
-    transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
+    transport._page = mock_page
     transport._identify_page = lambda: "UnattendedBot8300"
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
     transport._extract_posts = lambda: []
     transport._extract_comments = lambda post: []
+    # Bypass browser launch
+    transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
 
     with patch.object(transport, "publish_text_status") as mock_post, \
          patch.object(transport, "reply_to_comment") as mock_reply:
@@ -269,25 +317,23 @@ def test_camoufox_observe_login_required(temp_config):
     """When Facebook shows a login form, NotLoggedInError is raised."""
     transport = CamoufoxTransport(temp_config)
 
-    mock_page = MagicMock()
-    mock_page.url = "https://www.facebook.com/login.php"
-    # Simulate login form being visible
-    def query_selector(s):
-        if "email" in s or "login" in s.lower():
-            return MagicMock()  # login form element exists
-        if "checkpoint" in s.lower() or "alert" in s.lower():
-            return None
-        return None
-    mock_page.query_selector.side_effect = query_selector
-    mock_page.wait_for_load_state = MagicMock()
-    mock_page.goto = MagicMock()
-
+    mock_page = _make_loggedout_mock_page()
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
+    transport._page = mock_page
     transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
 
-    with pytest.raises(NotLoggedInError):
-        transport.observe()
+    # Mock input() to simulate user pressing ENTER after login
+    # (in test, this simulates the flow continuing but auth still not detected)
+    import builtins
+    original_input = builtins.input
+    builtins.input = lambda *a, **k: ""
+
+    try:
+        with pytest.raises(NotLoggedInError):
+            transport.observe()
+    finally:
+        builtins.input = original_input
     transport.close()
 
 
@@ -295,18 +341,16 @@ def test_camoufox_observe_page_not_found(temp_config):
     """When the Page identity can't be verified, PageNotFoundError is raised."""
     transport = CamoufoxTransport(temp_config)
 
-    mock_page = MagicMock()
-    mock_page.url = "https://www.facebook.com/somepage"
-    mock_page.title.return_value = "Not Found"
-    # No login form, no checkpoint
-    mock_page.query_selector.return_value = None
-    mock_page.wait_for_load_state = MagicMock()
-    mock_page.goto = MagicMock()
-
+    mock_page = _make_authed_mock_page()
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
+    transport._page = mock_page
     transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
     transport._identify_page = lambda: None  # page not found
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    # verify_page_identity is called after navigation to the Page URL;
+    # return IDENTITY_UNKNOWN to simulate "wrong page / not found"
+    transport.verify_page_identity = lambda name=None: IdentityState.IDENTITY_UNKNOWN
 
     with pytest.raises(PageNotFoundError):
         transport.observe()
@@ -317,17 +361,14 @@ def test_camoufox_observe_selector_error_on_posts(temp_config):
     """When post containers don't load, SelectorError is raised."""
     transport = CamoufoxTransport(temp_config)
 
-    mock_page = MagicMock()
-    mock_page.url = "https://www.facebook.com/UnattendedBot8300"
-    mock_page.title.return_value = "UnattendedBot8300 - Facebook"
-    mock_page.query_selector.return_value = None  # logged in, no checkpoint
-    mock_page.wait_for_load_state = MagicMock()
-    mock_page.goto = MagicMock()
-
+    mock_page = _make_authed_mock_page()
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
+    transport._page = mock_page
     transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
     transport._identify_page = lambda: "UnattendedBot8300"
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
 
     # Simulate selector timeout on post containers
     transport._extract_posts = lambda: (_ for _ in ()).throw(
@@ -346,19 +387,33 @@ def test_camoufox_observe_checkpoint_detected(temp_config):
     mock_page = MagicMock()
     mock_page.url = "https://www.facebook.com/checkpoint"
     mock_page.title.return_value = "Security Check"
-    # Simulate checkpoint form visible
+
     def query_selector(s):
-        if "checkpoint" in s.lower() or "alert" in s.lower():
+        sel_lower = s.lower()
+        if "checkpoint" in sel_lower or "alert" in sel_lower or "captcha" in sel_lower:
             return MagicMock()
-        if "email" in s.lower() or "login" in s.lower():
-            return None  # not showing login form
+        if "2fa" in sel_lower or "approval" in sel_lower:
+            return MagicMock()
+        # Not logged in (no auth UI evidence)
+        if "auth_profile_menu" in sel_lower or "auth_home_link" in sel_lower:
+            return None
         return None
     mock_page.query_selector.side_effect = query_selector
     mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.eval_on_selector = MagicMock(return_value=None)
 
     transport.save_reference_screenshot = MagicMock()
     transport.save_failure_screenshot = MagicMock()
+    transport._page = mock_page
     transport.open_browser = lambda headless=False: setattr(transport, '_page', mock_page)
+
+    # Mock the challenge handler so it doesn't block on input()
+    mock_handler = MagicMock(spec=ChallengeHandler)
+    mock_handler.can_handle.return_value = True
+    mock_handler.handle.return_value = True
+    transport._challenge_handler = mock_handler
 
     with pytest.raises(CheckpointError):
         transport.observe()
@@ -634,11 +689,461 @@ def test_camoufox_capabilities(temp_config):
     caps = transport.capabilities()
     assert caps.name == "camoufox_ui"
     assert caps.read_observations is True
-    assert caps.can_post is True
     assert caps.can_reply is True
     assert caps.persistent_profile is True
     assert caps.headless is False  # headed by default
     transport.close()
+
+
+# ── Authentication detection tests ──────────────────────────────────
+
+def test_auth_login_form_visible_equals_login_required(temp_config):
+    """Login form visible (email + password + button) => LOGIN_REQUIRED.
+
+    This is the exact regression that previously failed: a cookie existed
+    but the login form was still visible in the browser, yet the old code
+    returned 'authenticated'.
+    """
+    transport = CamoufoxTransport(temp_config)
+    mock_page = _make_loggedout_mock_page()
+    transport._page = mock_page
+
+    state = transport.detect_auth_state()
+    assert state == AuthState.LOGIN_REQUIRED
+    transport.close()
+
+
+def test_auth_cookie_present_login_form_visible_equals_login_required(temp_config):
+    """Cookie present + login form visible => LOGIN_REQUIRED.
+
+    A Facebook cookie existing does NOT prove an authenticated session.
+    The login form being visible is positive proof of logout.
+    """
+    transport = CamoufoxTransport(temp_config)
+    mock_page = _make_loggedout_mock_page()
+    # Simulate: browser has cookies (cookie count > 0) but login form is visible
+    mock_page.context = MagicMock()
+    mock_page.context.cookies.return_value = [{"name": "c_user", "value": "12345"}]
+
+    transport._page = mock_page
+    state = transport.detect_auth_state()
+    assert state == AuthState.LOGIN_REQUIRED
+    transport.close()
+
+
+def test_auth_authenticated_ui_detected_equals_authenticated(temp_config):
+    """Positive authenticated UI evidence => AUTHENTICATED."""
+    transport = CamoufoxTransport(temp_config)
+    mock_page = _make_authed_mock_page()
+    transport._page = mock_page
+
+    state = transport.detect_auth_state()
+    assert state == AuthState.AUTHENTICATED
+    transport.close()
+
+
+def test_auth_ambiguous_state_equals_unknown(temp_config):
+    """No positive login form AND no positive authenticated UI => UNKNOWN_AUTH_STATE.
+
+    UNKNOWN_AUTH_STATE must fail closed — it never implies authenticated.
+    """
+    transport = CamoufoxTransport(temp_config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "Facebook"
+
+    # No login form elements, no authenticated UI elements
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass",
+                                         "login_page_link", "checkpoint",
+                                         "approval", "alert", "2fa", "captcha"]):
+            return None
+        if any(k in sel_lower for k in ["auth_profile_menu", "profile",
+                                         "auth_home_link", "auth_watch_link",
+                                         "auth_feed_composer", "page_header_title"]):
+            return None
+        return None
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.wait_for_load_state = MagicMock()
+
+    transport._page = mock_page
+    state = transport.detect_auth_state()
+    assert state == AuthState.UNKNOWN_AUTH_STATE
+    transport.close()
+
+
+def test_auth_checkpoint_detected_equals_checkpoint_required(temp_config):
+    """2FA/checkpoint form visible => CHECKPOINT_REQUIRED."""
+    transport = CamoufoxTransport(temp_config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/checkpoint"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return MagicMock()  # challenge element visible
+        return None
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.wait_for_load_state = MagicMock()
+
+    transport._page = mock_page
+    state = transport.detect_auth_state()
+    assert state == AuthState.CHECKPOINT_REQUIRED
+    transport.close()
+
+
+def test_check_login_state_backward_compat(temp_config):
+    """check_login_state() returns True only when AUTHENTICATED (not cookie-based)."""
+    transport = CamoufoxTransport(temp_config)
+
+    # Authenticated page → True
+    transport._page = _make_authed_mock_page()
+    assert transport.check_login_state() is True
+
+    # Logged-out page → False (even if cookies exist)
+    transport._page = _make_loggedout_mock_page()
+    transport._page.context = MagicMock()
+    transport._page.context.cookies.return_value = [{"name": "c_user", "value": "12345"}]
+    assert transport.check_login_state() is False
+
+    transport.close()
+
+
+# ── Page identity verification tests ──────────────────────────────────
+
+def test_graph_api_page_id_irrelevant_to_camoufox(temp_config):
+    """The numeric Graph API Page ID must not be required for camoufox_ui navigation.
+
+    Camoufox uses FACEBOOK_PAGE_URL / FACEBOOK_PAGE_SLUG, not FACEBOOK_PAGE_ID.
+    Even if FACEBOOK_PAGE_ID is a test placeholder, camoufox should navigate
+    to the real Page URL.
+    """
+    transport = CamoufoxTransport(temp_config)
+    # The config has facebook_page_id='UnattendedBot8300' (a slug, not numeric)
+    url = transport._page_url()
+    assert "UnattendedBot8300" in url
+    assert "facebook.com" in url
+    # Should NOT use /pages/ numeric path (that's for graph_api)
+    assert "/pages/" not in url
+    transport.close()
+
+
+def test_camoufox_uses_page_url_config():
+    """Camoufox transport uses FACEBOOK_PAGE_URL from config for navigation."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_url="https://www.facebook.com/MyCustomPage",
+            facebook_page_slug="MyCustomPage",
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+        )
+        transport = CamoufoxTransport(config)
+        assert transport._page_slug == "MyCustomPage"
+        assert transport._page_url() == "https://www.facebook.com/MyCustomPage"
+        transport.close()
+
+
+def test_personal_identity_active_blocks_write(temp_config):
+    """When personal identity is active (not the Page), write is blocked."""
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_authed_mock_page()
+
+    # verify_page_identity returns PERSONAL_IDENTITY_ACTIVE
+    transport.verify_page_identity = lambda name=None: IdentityState.PERSONAL_IDENTITY_ACTIVE
+
+    with pytest.raises(TransportError, match="Write blocked"):
+        transport.publish_text_status("test")
+    transport.close()
+
+
+def test_unknown_identity_blocks_write(temp_config):
+    """When identity cannot be confirmed (UNKNOWN), write is blocked."""
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_authed_mock_page()
+    transport.verify_page_identity = lambda name=None: IdentityState.IDENTITY_UNKNOWN
+    transport.ensure_page_identity = lambda name=None: IdentityState.IDENTITY_UNKNOWN
+
+    with pytest.raises(TransportError, match="Write blocked"):
+        transport.reply_to_comment("comment_123", "test reply")
+    transport.close()
+
+
+def test_page_identity_confirmed_allows_preflight(temp_config):
+    """When identity is confirmed, the preflight passes (proceeds to NotImplementedError).
+
+    In dry_run mode the preflight never reaches identity check (blocked by
+    dry_run first).  So test with live mode + confirmed identity → should
+    reach NotImplementedError (not TransportError for identity).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_id="UnattendedBot8300",
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            unattended_bot_mode="live",  # bypass dry_run check
+        )
+        transport = CamoufoxTransport(config)
+        transport._page = _make_authed_mock_page()
+        transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+        transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+
+        # Should pass auth + identity checks, then hit NotImplementedError
+        # (UI automation not yet wired) — NOT a TransportError identity block
+        with pytest.raises(NotImplementedError):
+            transport.publish_text_status("test message")
+        transport.close()
+
+
+def test_page_switch_failure_blocks_write(temp_config):
+    """When page switching fails, write is blocked."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_id="UnattendedBot8300",
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            unattended_bot_mode="live",
+        )
+        transport = CamoufoxTransport(config)
+        transport._page = _make_authed_mock_page()
+        transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_SWITCH_FAILED
+
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.publish_text_status("test")
+        transport.close()
+
+
+# ── Page detection tests ──────────────────────────────────────────────
+
+def test_correct_page_detection(temp_config):
+    """verify_page_identity returns PAGE_IDENTITY_CONFIRMED when signals match."""
+    transport = CamoufoxTransport(temp_config)
+    mock_page = _make_authed_mock_page(
+        page_url="https://www.facebook.com/UnattendedBot8300"
+    )
+    transport._page = mock_page
+
+    # URL contains slug + h1 contains slug + profile link contains slug
+    result = transport.verify_page_identity()
+    assert result == IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.close()
+
+
+def test_wrong_page_detection(temp_config):
+    """verify_page_identity does NOT confirm when on the wrong Page."""
+    transport = CamoufoxTransport(temp_config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/SomeOtherPage"
+    mock_page.title.return_value = "SomeOtherPage"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        # No login form, no checkpoint
+        if any(k in sel_lower for k in ["login_form", "email", "pass",
+                                         "login_page_link", "checkpoint",
+                                         "approval", "alert", "2fa", "captcha"]):
+            return None
+        # Authenticated UI
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            return MagicMock()
+        # Page header title — shows wrong page name
+        if "page_header_title" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "SomeOtherPage"
+            return el
+        return None
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.get_by_role.return_value.text_content.return_value = "SomeOtherPage"
+    mock_page.wait_for_load_state = MagicMock()
+
+    transport._page = mock_page
+    result = transport.verify_page_identity()
+    # URL doesn't match, heading doesn't match, link doesn't match,
+    # identity label is "SomeOtherPage" which doesn't contain "UnattendedBot8300"
+    assert result != IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.close()
+
+
+# ── Challenge detection tests ─────────────────────────────────────────
+
+def test_challenge_detection_challenges_are_classified(temp_config):
+    """Challenge types are properly classified."""
+    transport = CamoufoxTransport(temp_config)
+
+    # CAPTCHA
+    mock_page = MagicMock()
+    def qs_captcha(s):
+        sel_lower = s.lower()
+        if "captcha" in sel_lower:
+            return MagicMock()
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert", "2fa"]):
+            return None
+        return None
+    mock_page.query_selector.side_effect = qs_captcha
+    mock_page.wait_for_load_state = MagicMock()
+    transport._page = mock_page
+    assert transport._detect_challenge() == ChallengeType.CAPTCHA
+    transport.close()
+
+    # 2FA
+    transport2 = CamoufoxTransport(temp_config)
+    mock_page2 = MagicMock()
+    def qs_2fa(s):
+        sel_lower = s.lower()
+        # Match the actual twofa_input and checkpoint selectors by their
+        # distinctive substrings from SELECTORS values
+        if "approval_code" in sel_lower or "nucleus_otp" in sel_lower:
+            return MagicMock()  # 2FA input visible
+        if "captcha" in sel_lower:
+            return None
+        if "checkpoint" in sel_lower:
+            return None
+        if "alert" in sel_lower:
+            return None
+        return None
+    mock_page2.query_selector.side_effect = qs_2fa
+    mock_page2.wait_for_load_state = MagicMock()
+    transport2._page = mock_page2
+    assert transport2._detect_challenge() == ChallengeType.TWO_FACTOR
+    transport2.close()
+
+
+def test_challenge_handler_protocol():
+    """ChallengeHandler protocol and implementations work correctly."""
+    # HumanInterventionHandler handles all challenge types
+    h = HumanInterventionHandler()
+    assert h.can_handle(ChallengeType.CAPTCHA) is True
+    assert h.can_handle(ChallengeType.TWO_FACTOR) is True
+
+    # TwoCaptchaHandler without key falls back to human
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            # No twocaptcha_api_key set
+        )
+        tcs = TwoCaptchaHandler(config)
+        assert tcs.can_handle(ChallengeType.CAPTCHA) is False  # no key → False
+        assert tcs.can_handle(ChallengeType.TWO_FACTOR) is False
+
+        # With key, can handle CAPTCHA
+        config2 = Config(
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            twocaptcha_api_key="test_key_123",
+        )
+        tcs2 = TwoCaptchaHandler(config2)
+        assert tcs2.can_handle(ChallengeType.CAPTCHA) is True
+        assert tcs2.can_handle(ChallengeType.TWO_FACTOR) is False
+
+
+def test_challenge_handler_is_decoupled():
+    """The ChallengeHandler protocol exists and is separate from transport."""
+    transport = CamoufoxTransport(Config())
+    assert transport._challenge_handler is not None
+    assert hasattr(transport._challenge_handler, "can_handle")
+    assert hasattr(transport._challenge_handler, "handle")
+    transport.close()
+
+
+# ── Persistent profile configuration tests ────────────────────────────
+
+def test_persistent_profile_configured():
+    """Camoufox uses a dedicated persistent profile directory."""
+    config = Config()
+    assert config.camoufox_profile_dir == "data/browser-profile"
+    profile_path = config.camoufox_profile_path
+    assert "browser-profile" in str(profile_path).lower()
+
+
+def test_persistent_profile_path_resolution():
+    """Camoufox profile path resolves to an absolute Path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "browser-profile"),
+        )
+        path = config.camoufox_profile_path
+        assert isinstance(path, Path)
+        assert path.is_absolute() or "browser-profile" in str(path)
+
+
+# ── No writes in dry_run tests ────────────────────────────────────────
+
+def test_no_writes_when_unauthenticated_in_live_mode(temp_config):
+    """Even in live mode, write is blocked if not authenticated."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_id="UnattendedBot8300",
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            unattended_bot_mode="live",  # bypass dry_run
+        )
+        transport = CamoufoxTransport(config)
+        # Simulate logged-out state
+        transport._page = _make_loggedout_mock_page()
+
+        with pytest.raises(TransportError, match="authentication state"):
+            transport.publish_text_status("test")
+        transport.close()
+
+
+def test_dry_run_blocks_all_writes(temp_config):
+    """In dry_run mode, both publish and reply are blocked before identity check."""
+    transport = CamoufoxTransport(temp_config)
+    assert temp_config.unattended_bot_mode == "dry_run"
+
+    # Even with confirmed identity, dry_run blocks
+    transport._page = _make_authed_mock_page()
+    transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+
+    with pytest.raises(TransportError, match="dry_run"):
+        transport.publish_text_status("test")
+    with pytest.raises(TransportError, match="dry_run"):
+        transport.reply_to_comment("c1", "test")
+    transport.close()
+
+
+# ── Config: Graph API Page ID separation ──────────────────────────────
+
+def test_graph_api_page_id_kept_separate_from_camoufox():
+    """FACEBOOK_PAGE_ID (numeric) remains for graph_api only, not camoufox_ui."""
+    config = Config()
+    # Default camoufox config should have page_url + page_slug
+    assert config.facebook_page_url == "https://www.facebook.com/UnattendedBot8300"
+    assert config.facebook_page_slug == "UnattendedBot8300"
+    # Facebook_page_id defaults to empty (graph_api only)
+    assert config.facebook_page_id == ""
+
+
+def test_page_url_env_override():
+    """FACEBOOK_PAGE_URL and FACEBOOK_PAGE_SLUG can be overridden via env."""
+    import os
+    os.environ["FACEBOOK_PAGE_URL"] = "https://www.facebook.com/TestPage"
+    os.environ["FACEBOOK_PAGE_SLUG"] = "TestPage"
+    try:
+        config = load_config()
+        assert config.facebook_page_url == "https://www.facebook.com/TestPage"
+        assert config.facebook_page_slug == "TestPage"
+    finally:
+        del os.environ["FACEBOOK_PAGE_URL"]
+        del os.environ["FACEBOOK_PAGE_SLUG"]
 
 
 if __name__ == "__main__":

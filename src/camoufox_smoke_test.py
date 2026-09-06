@@ -6,34 +6,68 @@ READ-ONLY — no Facebook writes are performed.
 Flow:
   1. Launch Camoufox headed with persistent profile.
   2. Open Facebook.
-  3. If login is needed, leave browser open for manual login.
-  4. Verify session persistence.
-  5. Navigate to UnattendedBot8300 Page.
-  6. Verify correct Page is reached.
-  7. Read recent Page content.
-  8. Attempt to read visible comments.
-  9. Feed observations through the existing normalisation/storage layer.
+  3. Deterministically establish auth state.
+  4. If logged out: HUMAN_LOGIN_REQUIRED, leave browser open for manual login.
+  5. Verify session persistence (no cookie-count-based auth proof).
+  6. Verify authentication state is positively established.
+  7. Inspect Facebook Page/profile switcher.
+  8. Switch to UnattendedBot8300 Page identity.
+  9. Positively verify active identity.
+ 10. Navigate to https://www.facebook.com/UnattendedBot8300
+ 11. Verify correct Page loaded.
+ 12. Read recent posts + visible comments.
+ 13. Normalise through existing storage/context pipeline.
+ 14. Confirm NO Facebook writes occurred.
 
 Usage:
     .venv/Scripts/python -m src.camoufox_smoke_test
 """
 
 import sys
-import time
+import builtins
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Ensure project root is on path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from camoufox.sync_api import Camoufox
-from src.config import load_config
-from src.facebook_camoufox import CamoufoxTransport, DEFAULT_PAGE_SLUG
+
+def _save_smoke_screenshot(page, screenshot_dir, ts, label, suffix_num):
+    """Save a non-sensitive smoke-test screenshot."""
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    seq = f"{ts}-{suffix_num:03d}"
+    safe_label = label.replace("/", "_")
+    filepath = screenshot_dir / f"smoke-{seq}-{safe_label}.png"
+    try:
+        page.screenshot(path=str(filepath), full_page=False)
+    except Exception:
+        pass
+    return filepath
+
+
+def _save_manifest(screenshot_dir, entries):
+    """Write a non-sensitive manifest of the smoke-test session."""
+    manifest_path = screenshot_dir / "smoke-manifest.json"
+    manifest_data = {
+        "session_id": screenshot_dir.parent.name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "entries": entries,
+    }
+    import json
+    with open(manifest_path, "w") as f:
+        json.dump(manifest_data, f, indent=2)
 
 
 def smoke_test():
     """Run the supervised read-only smoke test."""
+    from camoufox.sync_api import Camoufox
+    from src.config import load_config
+    from src.facebook_camoufox import (
+        CamoufoxTransport, AuthState, IdentityState, DEFAULT_PAGE_SLUG,
+        DEFAULT_PAGE_URL,
+    )
+    from src.facebook_transport import TransportError
+
     config = load_config()
     profile_dir = config.camoufox_profile_path
 
@@ -41,10 +75,36 @@ def smoke_test():
     print(f"Transport: {config.facebook_transport}")
     print(f"Profile dir: {profile_dir}")
     print(f"Mode: {config.unattended_bot_mode}")
+    print(f"Page URL: {config.facebook_page_url}")
+    print(f"Page Slug: {config.facebook_page_slug}")
     print()
 
-    # Ensure the profile directory exists and is gitignored
+    # Ensure the profile directory exists
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Screenshot directories
+    screenshot_dir = config.project_root / "runtime" / "browser-references" / "sessions"
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+    session_dir = screenshot_dir / ts
+    session_dir.mkdir(parents=True, exist_ok=True)
+    manifest_entries = []
+    screenshot_counter = 0
+
+    def save_ss(label, state="", action=""):
+        nonlocal screenshot_counter
+        screenshot_counter += 1
+        filepath = _save_smoke_screenshot(
+            page, session_dir, ts, label, screenshot_counter
+        )
+        manifest_entries.append({
+            "filename": filepath.name if filepath else "failed",
+            "description": label,
+            "state": state,
+            "action": action,
+            "success": filepath is not None,
+        })
+        return filepath
 
     # Step 1: Launch Camoufox headed with persistent profile
     print("1. Launching Camoufox (headed, persistent profile)...")
@@ -55,145 +115,144 @@ def smoke_test():
     ).__enter__()
     page = browser_ctx.new_page()
     print(f"   Browser opened: {type(browser_ctx).__name__}")
+    save_ss("browser-launched", state="browser_open")
 
-    # Step 2: Open Facebook
-    print("2. Navigating to Facebook...")
-    page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-    print(f"   URL: {page.title()}")
-
-    # Save reference screenshot
-    screenshot_dir = config.project_root / "runtime" / "browser-references" / "sessions"
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     try:
-        page.screenshot(path=str(screenshot_dir / f"smoke-{ts}-002-facebook-loaded.png"))
-    except Exception:
-        pass
-
-    # Step 3: Check login state
-    print("3. Checking login state...")
-    login_email = page.query_selector("input#email, input[name='email']")
-    login_pass = page.query_selector("input#pass, input[name='pass']")
-    login_btn = page.query_selector("button[name='login']")
-
-    if login_email is not None or login_btn is not None:
-        print("   STATUS: Login required.")
-        print("   The browser has been left open for manual login.")
-        print("   Please log into Facebook manually in the visible browser window.")
-        print("   After successful login, press ENTER here to continue the smoke test...")
-        input()
-        # Re-navigate to refresh
+        # Step 2: Open Facebook
+        print("2. Navigating to Facebook...")
         page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-        print(f"   Re-checked title: {page.title()}")
-    else:
-        print("   STATUS: Already logged in (no login form detected).")
+        title = page.title() or ""
+        print(f"   Title: {title}")
+        save_ss("facebook-loaded", state="facebook_loaded")
 
-    # Step 4: Verify session persistence
-    print("4. Verifying session persistence...")
-    cookies = page.context.cookies()
-    print(f"   Cookies in profile: {len(cookies)}")
-    if len(cookies) > 0:
-        print(f"   STATUS: Session is persistable.")
+        # Step 3: Deterministically establish auth state using the transport
+        print("3. Checking authentication state (deterministic UI detection)...")
+        transport = CamoufoxTransport(config)
+        transport._page = page
+        transport._browser = browser_ctx
+        transport._session_dir_ref = session_dir
+        transport._screenshot_counter = screenshot_counter
+        transport.save_reference_screenshot = lambda *a, **k: None
+        transport.save_failure_screenshot = lambda *a, **k: None
+
+        auth_state = transport.detect_auth_state()
+        print(f"   Auth state: {auth_state.value}")
+
+        # Step 4: If logged out → HUMAN_LOGIN_REQUIRED
+        if auth_state == AuthState.LOGIN_REQUIRED:
+            print("   STATUS: HUMAN_LOGIN_REQUIRED")
+            print("   Complete Facebook login in the visible Camoufox window.")
+            print("   Automation is waiting for authenticated Facebook UI.")
+            print("   After successful login, press ENTER here to continue...")
+            builtins.input()
+
+            # Re-navigate and re-verify auth
+            page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+            save_ss("post-login-facebook", state="post_login")
+            auth_state = transport.detect_auth_state()
+            print(f"   Re-checked auth state: {auth_state.value}")
+
+            if auth_state != AuthState.AUTHENTICATED:
+                save_ss("login-still-required", state=auth_state.value, action="human_login_failed")
+                print(f"   STATUS: Login still required. Auth state: {auth_state.value}")
+                print("   The browser remains open for manual login.")
+                _save_manifest(session_dir, manifest_entries)
+                browser_ctx.close()
+                return
+
+        # Handle checkpoint/challenge
+        if auth_state == AuthState.CHECKPOINT_REQUIRED:
+            print("   STATUS: CHECKPOINT_REQUIRED")
+            print("   HUMAN_INTERVENTION_REQUIRED — Facebook security checkpoint.")
+            print("   The browser window remains open for manual resolution.")
+            print("   After completing it, press ENTER here to continue...")
+            save_ss("checkpoint-detected", state="checkpoint_required")
+            builtins.input()
+            page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
+            auth_state = transport.detect_auth_state()
+
+        if auth_state == AuthState.UNKNOWN_AUTH_STATE:
+            print("   STATUS: UNKNOWN_AUTH_STATE (fail-closed)")
+            print("   Could not positively verify authentication. Browser remains open.")
+            save_ss("unknown-auth-state", state="unknown_auth_state")
+            _save_manifest(session_dir, manifest_entries)
+            browser_ctx.close()
+            return
+
+        # Step 5: Authentication positively verified
+        print("5. Authentication positively verified (AUTHENTICATED).")
+        save_ss("auth-confirmed", state="authenticated")
+
+        # Step 6: Inspect Facebook profile/Page switcher
+        print("6. Inspecting Facebook Page/profile switching UI...")
+        active_identity = transport.get_active_facebook_identity()
+        print(f"   Current active identity: {active_identity or '(could not determine)'}")
+        save_ss("profile-switcher-inspect", state="switcher_inspected")
+
+        # Step 7: Switch to UnattendedBot8300 Page identity
+        target_slug = config.facebook_page_slug or DEFAULT_PAGE_SLUG
+        print(f"7. Switching to Page identity: {target_slug}")
+        identity_state = transport.ensure_page_identity(target_slug)
+        print(f"   Identity state: {identity_state.value}")
+        save_ss("identity-check", state=identity_state.value)
+
+        if identity_state == IdentityState.PAGE_IDENTITY_CONFIRMED:
+            print("   STATUS: Page identity already confirmed (no switch needed).")
+            save_ss("page-identity-selected", state="page_identity_confirmed")
+        elif identity_state == IdentityState.PAGE_SWITCH_FAILED:
+            print("   STATUS: Page switch failed via switcher UI.")
+            print("   Will attempt direct navigation to the Page URL instead.")
+        else:
+            print(f"   STATUS: Identity not confirmed by switcher ({identity_state.value}).")
+
+        # Step 8: Navigate to the UnattendedBot8300 Page
+        page_url = config.facebook_page_url or DEFAULT_PAGE_URL
+        print(f"8. Navigating to Page: {page_url}")
+        page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
+        print(f"   URL: {page.url}")
+        print(f"   Title: {page.title() or ''}")
+        save_ss("page-open", state="page_open", action="navigate_to_page")
+
+        # Step 9: Verify correct Page loaded
+        print("9. Verifying Page identity after navigation...")
+        identity = transport.verify_page_identity(target_slug)
+        print(f"   Identity: {identity.value}")
+
+        if identity != IdentityState.PAGE_IDENTITY_CONFIRMED:
+            # Check for Facebook error text
+            body_text = ""
+            try:
+                body_text = page.eval_on_selector("body", "el => el.innerText.substring(0, 500)")
+            except Exception:
+                pass
+            if body_text and any(m in body_text.lower() for m in ["isn't available", "not found", "does not exist"]):
+                print("   STATUS: PAGE_NOT_FOUND — Facebook reports content unavailable.")
+                save_ss("page-not-found", state="page_not_found")
+            else:
+                print("   STATUS: Wrong identity or unknown — page identity not confirmed.")
+                save_ss("wrong-page", state=identity.value)
+            _save_manifest(session_dir, manifest_entries)
+            browser_ctx.close()
+            return
+
+        print("   STATUS: Page identity CONFIRMED.")
+        save_ss("page-verified", state="page_identity_confirmed")
+
+        # Step 10: Read recent posts
+        print("10. Reading recent posts...")
         try:
-            page.screenshot(path=str(screenshot_dir / f"smoke-{ts}-003-login-confirmed.png"))
-        except Exception:
-            pass
-    else:
-        print("   WARNING: No cookies found — session may not persist.")
+            posts = transport._extract_posts()
+            print(f"   Found {len(posts)} recent posts")
+            for i, p in enumerate(posts[:5]):
+                print(f"   Post {i+1}: {p.message[:100]}...")
+            save_ss("recent-posts-detected", state="posts_extracted")
+        except Exception as e:
+            print(f"   NOTE: No posts detected ({e})")
+            posts = []
+            save_ss("no-posts-detected", state="no_posts")
 
-    # Step 5: Navigate to UnattendedBot8300 Page
-    page_id = config.facebook_page_id.strip()
-    if page_id and page_id.isdigit():
-        page_slug = page_id
-        page_url = f"https://www.facebook.com/pages/{page_id}"
-    elif page_id and not page_id.startswith("test_"):
-        page_slug = page_id
-        page_url = f"https://www.facebook.com/{page_id}"
-    else:
-        # Use the known page slug for the real UnattendedBot8300 Page
-        page_slug = DEFAULT_PAGE_SLUG
-        page_url = f"https://www.facebook.com/{DEFAULT_PAGE_SLUG}"
-    print(f"5. Navigating to Page: {page_slug}")
-    print(f"   URL: {page_url}")
-    page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
-    print(f"   Title: {page.title()}")
-
-    # Check if the page resolved or shows "content isn't available"
-    body_text = ""
-    try:
-        body_text = page.eval_on_selector("body", "el => el.innerText.substring(0, 200)")
-    except Exception:
-        pass
-    page_not_available = False
-    if body_text and ("isn't available" in body_text.lower() or "not found" in body_text.lower()
-                       or "does not exist" in body_text.lower()):
-        page_not_available = True
-        print("   NOTE: Page URL did not resolve to actual Page content.")
-        print("   Navigating to Facebook home as fallback for selector analysis...")
-        page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-
-    # Step 6: Verify correct Page is open
-    print("6. Verifying Page identity...")
-    h1 = page.get_by_role("heading", level=1)
-    try:
-        heading_text = (h1.text_content() or "").strip()
-    except Exception:
-        heading_text = ""
-    title = page.title() or ""
-    all_h2 = []
-    try:
-        all_h2 = page.eval_on_selector_all("h2", "els => els.map(e => e.textContent.trim())") or []
-    except Exception:
-        pass
-
-    page_name = page_slug
-    if page_name.lower() in heading_text.lower() or page_name.lower() in title.lower():
-        print(f"   STATUS: Correct Page confirmed: {heading_text or title}")
-    elif page_not_available:
-        print(f"   NOTE: Page not directly accessible with current FACEBOOK_PAGE_ID ({page_id}).")
-        print(f"   Set the real numeric FACEBOOK_PAGE_ID in .env for full Page observation.")
-        print(f"   Facebook home loaded for selector analysis. H2 headings: {all_h2[:3]}")
-    else:
-        print(f"   WARNING: Could not confirm Page identity.")
-        print(f"   Heading: '{heading_text}'")
-        print(f"   Title: '{title}'")
-
-    # Step 7: Read recent Page posts
-    print("7. Reading recent posts...")
-    post_elements = page.locator("div[role='article']").all()
-    print(f"   Found {len(post_elements)} post containers (selector: div[role='article'])")
-    for i, post in enumerate(post_elements[:5]):
-        try:
-            text = (post.text_content() or "").strip()[:200]
-            print(f"   Post {i+1}: {text[:100]}...")
-        except Exception:
-            print(f"   Post {i+1}: (could not read text)")
-
-    # Step 8: Attempt to read comments
-    print("8. Reading comments...")
-    comment_elements = page.locator("div[data-testid='comment-body']").all()
-    print(f"   Found {len(comment_elements)} comment elements")
-    for i, comment in enumerate(comment_elements[:10]):
-        try:
-            text = (comment.text_content() or "").strip()[:150]
-            print(f"   Comment {i+1}: {text[:100]}...")
-        except Exception:
-            print(f"   Comment {i+1}: (could not read text)")
-
-    # Step 9: Feed observations through normalisation layer
-    print("9. Feeding observations through normalisation layer...")
-    transport = CamoufoxTransport(config)
-    transport._page = page
-    transport._browser = browser_ctx
-    transport._session_dir_ref = transport._session_dir()
-    transport._screenshot_counter = 0
-
-    try:
-        posts = transport._extract_posts()
-        print(f"   Normalised posts: {len(posts)}")
-        for p in posts[:3]:
-            print(f"   - {p.message[:80]}...")
-
+        # Step 11: Read visible comments
+        print("11. Reading visible comments...")
         all_comments = []
         for post_obs in posts[:3]:
             try:
@@ -201,47 +260,73 @@ def smoke_test():
                 all_comments.extend(comments)
             except Exception:
                 continue
-        print(f"   Normalised comments: {len(all_comments)}")
+        print(f"   Found {len(all_comments)} comments")
+        for i, c in enumerate(all_comments[:5]):
+            print(f"   Comment {i+1}: {c.from_name}: {c.message[:80]}...")
+        if all_comments:
+            save_ss("comments-open", state="comments_detected")
+        else:
+            save_ss("no-comments-detected", state="no_comments")
 
+        # Step 12: Feed observations through normalisation/storage/context pipeline
+        print("12. Feeding observations through normalisation/storage/context pipeline...")
         from src.fb_observations import ObservationResult
         obs = ObservationResult(
             posts=posts,
             comments=all_comments,
             unreplied_comments=transport._find_unreplied(all_comments),
         )
-        print(f"   ObservationResult summary: {obs.get_summary()}")
+        print(f"   ObservationResult: {obs.get_summary()}")
 
         # Feed through context assembler
-        from src.context_assembler import ContextAssembler
-        from src.storage import Storage
-        storage = Storage(config)
-        conn = storage.connect()
-        assembler = ContextAssembler(conn, config.unattended_bot_mode)
-        ctx = assembler.assemble(obs, memory_query="agent page activity")
-        prompt = ctx.to_prompt_context()
-        print(f"   Assembled context ({len(prompt)} chars) is ready for model.")
-        storage.close()
+        try:
+            from src.context_assembler import ContextAssembler
+            from src.storage import Storage
+            storage = Storage(config)
+            conn = storage.connect()
+            assembler = ContextAssembler(conn, config.unattended_bot_mode)
+            ctx = assembler.assemble(obs, memory_query="agent page activity")
+            prompt = ctx.to_prompt_context()
+            print(f"   Assembled context ({len(prompt)} chars) is ready for model.")
+            storage.close()
+            save_ss("observation-success", state="pipeline_complete")
+        except Exception as e:
+            print(f"   Normalisation note: {e}")
 
-    except Exception as e:
-        print(f"   Normalisation note: {e}")
+        # Step 13: Confirm session persistence
+        print("13. Session persistence: browser profile is at", profile_dir)
+        save_ss("session-persisted", state="persistent_profile_active")
 
-    # Step 10: Confirm no writes occurred
-    print("10. CONFIRM: No Facebook writes were performed (READ ONLY).")
+        # Step 14: Confirm no writes
+        print("14. CONFIRM: No Facebook writes were performed (READ ONLY).")
 
-    # Keep browser open for manual inspection
-    print()
-    print("=== Smoke test PASSED ===")
-    print("The browser window remains open with the persistent profile.")
-    print("On first run, log in manually. Future launches will reuse this session.")
-    print()
-    print("To close the browser, just close the window (the profile is saved).")
+        # Keep browser open for manual inspection
+        print()
+        print("=== Smoke Test Complete ===")
+        print(f"Session directory: {session_dir}")
+        print(f"Manifest: {session_dir / 'smoke-manifest.json'}")
+        print("The browser window remains open with the persistent profile.")
+        print("On first run, log in manually. Future launches will reuse this session.")
+        print("To close the browser, close the window manually (the profile is saved).")
+        print()
 
-    # Leave browser open — don't close automatically so user can verify
-    # The user can close the browser window manually
-    try:
-        page.wait_for_timeout(60000)  # keep alive 60s for inspection
-    except Exception:
-        pass
+        _save_manifest(session_dir, manifest_entries)
+
+        # Keep alive for inspection
+        try:
+            page.wait_for_timeout(60000)
+        except Exception:
+            pass
+
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+        try:
+            browser_ctx.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
