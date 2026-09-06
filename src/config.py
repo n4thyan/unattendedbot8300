@@ -22,6 +22,14 @@ class Config:
     facebook_app_id: str = ""
     facebook_app_secret: str = ""
     facebook_graph_api_version: str = "v26.0"
+
+    # Facebook transport selection
+    #   graph_api   — official Meta Graph API (dormant during development)
+    #   camoufox_ui — Camoufox browser UI transport (active experimental transport)
+    facebook_transport: str = "camoufox_ui"
+
+    # Camoufox browser profile (persistent authenticated session)
+    camoufox_profile_dir: str = "data/browser-profile"
     
     # Agent modes
     unattended_bot_mode: str = "dry_run"  # dry_run or live
@@ -49,6 +57,23 @@ class Config:
     def fb_base_url(self) -> str:
         """Return the base URL for Facebook Graph API calls."""
         return f"https://graph.facebook.com/{self.facebook_graph_api_version}"
+
+    @property
+    def supported_transports(self) -> list[str]:
+        """Return the list of supported Facebook transport names."""
+        return ["graph_api", "camoufox_ui"]
+
+    @property
+    def is_camoufox_transport(self) -> bool:
+        """Check if the active transport is the Camoufox UI transport."""
+        return self.facebook_transport == "camoufox_ui"
+
+    @property
+    def camoufox_profile_path(self) -> Path:
+        """Return the absolute path to the Camoufox persistent browser profile."""
+        if Path(self.camoufox_profile_dir).is_absolute():
+            return Path(self.camoufox_profile_dir)
+        return self.project_root / self.camoufox_profile_dir
     
     def is_live_mode(self) -> bool:
         """Check if we're in live mode (can execute actions)."""
@@ -94,6 +119,10 @@ def load_config(env_path: Optional[Path] = None) -> Config:
     config.facebook_app_id = os.getenv("FACEBOOK_APP_ID", "")
     config.facebook_app_secret = os.getenv("FACEBOOK_APP_SECRET", "")
     config.facebook_graph_api_version = os.getenv("FACEBOOK_GRAPH_API_VERSION", "v26.0")
+
+    # Facebook transport
+    config.facebook_transport = os.getenv("FACEBOOK_TRANSPORT", "camoufox_ui")
+    config.camoufox_profile_dir = os.getenv("CAMOUFOX_PROFILE_DIR", "data/browser-profile")
     
     # Agent modes
     config.unattended_bot_mode = os.getenv("UNATTENDED_BOT_MODE", "dry_run")
@@ -141,5 +170,11 @@ def validate_config(config: Config) -> list[str]:
     
     if not config.facebook_graph_api_version.startswith("v"):
         errors.append(f"Invalid FACEBOOK_GRAPH_API_VERSION: {config.facebook_graph_api_version}")
-    
+
+    if config.facebook_transport not in config.supported_transports:
+        errors.append(
+            f"Invalid FACEBOOK_TRANSPORT: {config.facebook_transport}. "
+            f"Supported: {', '.join(config.supported_transports)}"
+        )
+
     return errors

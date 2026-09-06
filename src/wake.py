@@ -166,50 +166,71 @@ class WakeOrchestrator:
         )
     
     def _observe(self, conn: sqlite3.Connection) -> ObservationResult:
-        """Observe Facebook state, using mocks in dry_run mode."""
-        collector = ObservationCollector(conn)
-        
-        if self.config.is_live_mode():
-            # Live mode - fetch from actual Facebook API
-            fb = FacebookClient(self.config)
+        """Observe Facebook state using the configured transport.
+
+        In dry_run mode the camoufox_ui transport still reads live data
+        (it is read-only by design), but no writes are ever attempted.
+        The graph_api transport is dormant during development.
+        """
+        from .facebook_transport import get_transport, TransportError
+
+        transport_name = self.config.facebook_transport
+
+        if transport_name == "camoufox_ui":
+            # Experimental browser UI transport (read-only)
             try:
-                page_info = fb.get_page_info()
-                posts_resp = fb.get_my_posts(limit=10)
-                
-                posts = extract_posts_from_response(posts_resp)
-                comments = []
-                for post in posts[:3]:
-                    comments_resp = fb.get_post_comments(post["fb_post_id"], limit=20)
-                    comments.extend(extract_comments_from_response(comments_resp, post["fb_post_id"]))
-                
-                return ObservationResult(
-                    posts=[PostObservation(
-                        fb_post_id=p.get("fb_post_id", p.get("id")),
-                        message=p.get("message", ""),
-                        created_time=p.get("created_time", ""),
-                        posted_by_page=p.get("posted_by_page", False),
-                        like_count=p.get("like_count", 0),
-                        comment_count=p.get("comment_count", 0),
-                        raw=p,
-                    ) for p in posts],
-                    comments=[CommentObservation(
-                        fb_comment_id=c.get("fb_comment_id", c.get("id")),
-                        post_id=c.get("post_id"),
-                        message=c.get("message", ""),
-                        from_name=c.get("from_name", "Someone"),
-                        from_id=c.get("from_id", ""),
-                        created_time=c.get("created_time", ""),
-                        parent_comment_id=c.get("parent_comment_id"),
-                        like_count=c.get("like_count", 0),
-                        raw=c,
-                    ) for c in comments],
-                )
-            except Exception as e:
-                # Return empty observations on error
+                transport = get_transport(self.config)
+                return transport.observe()
+            except TransportError:
+                # Transport-level failure (login needed, checkpoint, etc.)
+                # Return empty observations so the wake cycle can still log
+                # the issue and record a NOTHING decision.
                 return ObservationResult()
         else:
-            # Dry-run mode - use fixtures/mocks
-            return collector.collect_from_fixture()
+            # graph_api transport (dormant during development)
+            collector = ObservationCollector(conn)
+
+            if self.config.is_live_mode():
+                # Live mode - fetch from actual Facebook API
+                fb = FacebookClient(self.config)
+                try:
+                    page_info = fb.get_page_info()
+                    posts_resp = fb.get_my_posts(limit=10)
+
+                    posts = extract_posts_from_response(posts_resp)
+                    comments = []
+                    for post in posts[:3]:
+                        comments_resp = fb.get_post_comments(post["fb_post_id"], limit=20)
+                        comments.extend(extract_comments_from_response(comments_resp, post["fb_post_id"]))
+
+                    return ObservationResult(
+                        posts=[PostObservation(
+                            fb_post_id=p.get("fb_post_id", p.get("id")),
+                            message=p.get("message", ""),
+                            created_time=p.get("created_time", ""),
+                            posted_by_page=p.get("posted_by_page", False),
+                            like_count=p.get("like_count", 0),
+                            comment_count=p.get("comment_count", 0),
+                            raw=p,
+                        ) for p in posts],
+                        comments=[CommentObservation(
+                            fb_comment_id=c.get("fb_comment_id", c.get("id")),
+                            post_id=c.get("post_id"),
+                            message=c.get("message", ""),
+                            from_name=c.get("from_name", "Someone"),
+                            from_id=c.get("from_id", ""),
+                            created_time=c.get("created_time", ""),
+                            parent_comment_id=c.get("parent_comment_id"),
+                            like_count=c.get("like_count", 0),
+                            raw=c,
+                        ) for c in comments],
+                    )
+                except Exception as e:
+                    # Return empty observations on error
+                    return ObservationResult()
+            else:
+                # Dry-run mode - use fixtures/mocks
+                return collector.collect_from_fixture()
     
     def _make_decision(
         self,

@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import Config, load_config, validate_config
 from .storage import Storage
 from .fb_client import FacebookClient
+from .facebook_transport import get_transport, supported_transports
 from .memory import MemoryStore
 from .proposed_actions import ProposedActionQueue, ActionType
 from .safety import SafetyPolicy, SafetyResult
@@ -95,7 +96,8 @@ def handle_wake(args) -> int:
     
     # In Phase 0, wake is always dry-run
     print("=== Wake Cycle Started ===")
-    print(f"Mode: dry_run (Phase 0)")
+    print(f"Mode: {config.unattended_bot_mode} (dry_run = no Facebook writes)")
+    print(f"Transport: {config.facebook_transport}")
     print()
     
     storage = Storage(config)
@@ -324,23 +326,21 @@ def handle_execute(args) -> int:
     
     print(f"Executing action {args.id}: {action.action_type}")
     print(f"Reason: {action.reason}")
-    
-    fb = FacebookClient(config)
+
+    transport = get_transport(config)
     fb_result_id = None
     error = None
-    
+
     try:
         if action.action_type == ActionType.POST.value:
             message = action.payload.get("message", "")
-            result = fb.post_status(message)
-            fb_result_id = result.get("id")
+            fb_result_id = transport.publish_text_status(message)
             print(f"Posted to Facebook: {fb_result_id}")
-        
+
         elif action.action_type == ActionType.REPLY.value:
             message = action.payload.get("message", "")
             comment_id = action.target_fb_object
-            result = fb.reply_to_comment(comment_id, message)
-            fb_result_id = result.get("id")
+            fb_result_id = transport.reply_to_comment(comment_id, message)
             print(f"Replied on Facebook: {fb_result_id}")
     
     except Exception as e:

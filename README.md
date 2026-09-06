@@ -12,19 +12,29 @@ unattendedbot8300/
 ├── .env.example             # Environment variable template
 ├── .gitignore               # Standard Python + db entries
 ├── src/
-│   ├── __init__.py
-│   ├── config.py            # .env loader + validation
+│   ├── __init__.py          # Package entry, exports
+│   ├── config.py            # .env loader + validation + transport config
 │   ├── storage.py           # SQLite single-source-of-truth
-│   ├── fb_client.py         # Graph API v26.0 wrapper
+│   ├── fb_client.py         # Graph API v26.0 wrapper (dormant)
+│   ├── facebook_transport.py# Transport abstraction + factory
+│   ├── facebook_camoufox.py # Camoufox UI transport (active)
 │   ├── memory.py            # Memory storage/retrieval
-│   ├── safety.py            # Rate limits, dupe detection, moderation
+│   ├── safety.py            # Rate limits, spam detection, dupe check
 │   ├── proposed_actions.py  # Approval queue CRUD
 │   ├── wake_cycles.py       # Wake cycle logging
-│   └── cli.py               # CLI entry: wake, status, approve, reject
-├── data/                     # Created at runtime, gitignored
-│   └── bot.db                # SQLite database
+│   ├── context_assembler.py # Bounded context for model
+│   ├── wake.py              # Wake orchestrator (transport-agnostic)
+│   ├── cli.py               # CLI entry: wake, status, approve, reject
+│   └── camoufox_smoke_test.py # Supervised read-only browser test
+├── data/                     # Gitignored runtime data
+│   ├── bot.db                # SQLite database
+│   └── browser-profile/      # Camoufox persistent browser profile (gitignored)
+├── runtime/                  # Gitignored screenshots/logs
+│   └── browser-references/   # Reference screenshots + manifests (gitignored)
 ├── tests/
-│   └── test_storage.py      # Tests with mocked Graph API
+│   ├── test_storage.py      # Phase 0 tests
+│   ├── test_phase1.py       # Phase 1 tests
+│   └── test_facebook_transport.py  # Transport abstraction tests
 └── .hermes/                  # Project-local Hermes config (gitignored)
     └── config.yaml           # Hermes profile config for this project
 ```
@@ -32,22 +42,6 @@ unattendedbot8300/
 ## Current Status: Phase 0 Complete ✓
 
 Phase 0 is complete. The system is ready for testing with real Facebook credentials.
-
-```
-✓ Project structure created
-✓ SQLite storage layer with all required tables
-✓ Facebook Graph API client (v26.0 configurable)
-✓ Memory storage and retrieval
-✓ Safety policy (rate limits, spam detection, dupe check)
-✓ Proposed action queue with approval workflow
-✓ Wake cycle logging
-✓ CLI commands: wake, status, actions, execute, memory
-✓ SKILL.md with UnattendedBot8300 identity
-✓ Tests with mocks (20 passed)
-✓ Dry-run mode verified (no live Facebook writes)
-✓ .env.example with placeholders
-✓ .gitignore for secrets and db
-```
 
 ## Setup
 
@@ -124,6 +118,168 @@ python -m src.cli execute 1
 ```bash
 pytest tests/ -v
 ```
+
+## Facebook Transport Abstraction
+
+The agent supports pluggable Facebook transports, selected via the
+`FACEBOOK_TRANSPORT` environment variable in `.env`.
+
+### Supported Transports
+
+| Transport   | Type        | Status     | Description                                    |
+|-------------|-------------|------------|------------------------------------------------|
+| `camoufox_ui` | Browser UI  | **Active** | Camoufox experimental browser UI transport     |
+| `graph_api`   | Official API| Dormant    | Official Meta Graph API (v26.0) — future      |
+
+### Architecture
+
+```
+Hermes/model
+    ↓
+POST / REPLY / MEMORY / NOTHING  (DecisionModel)
+    ↓
+existing validation
+    ↓
+existing safety + rate limits
+    ↓
+existing approval queue
+    ↓
+Facebook transport (selected by FACEBOOK_TRANSPORT)
+    ├── camoufox_ui   ← ACTIVE (experimental)
+    └── graph_api     ← DORMANT (future official Meta integration)
+```
+
+The transport abstraction (`src/facebook_transport.py`) defines a clean
+`FacebookTransport` interface. The wake orchestrator (`src/wake.py`) is
+transport-agnostic — it calls `get_transport(config)` and uses the returned
+object's `observe()`, `publish_text_status()`, and `reply_to_comment()` methods.
+
+### Camoufox UI Transport (Active, Experimental)
+
+Meta Developer access is currently blocked by an account/device trust issue.
+For the foreseeable development phase, the Camoufox browser is used as an
+EXPERIMENTAL Facebook UI transport.
+
+**Camoufox** is a Firefox fork (bundled with anti-detection properties) driven
+via the `camoufox` Python package (v0.5.6), which wraps Playwright.
+
+#### Installation
+
+Camoufox is installed in the project's virtual environment:
+
+```bash
+cd unattendedbot8300
+source .venv/bin/activate  # or .venv/Scripts/activate on Windows
+# camoufox is already a dependency: pip install -e ".[camoufox]"
+```
+
+The Camoufox browser binary is auto-downloaded on first use to:
+`C:\Users\pc\AppData\Local\camoufox\camoufox\Cache\browsers\`
+
+#### Persistent Browser Profile
+
+A dedicated Camoufox browser profile is used for the persistent authenticated
+Facebook session:
+
+```
+data/browser-profile/
+```
+
+This directory is **gitignored** — no authentication/session material enters Git.
+
+**First launch:**
+1. The browser opens in headed/visible mode.
+2. Navigate to Facebook.
+3. If login is required, the browser is left visible for **manual** login.
+4. The user completes any 2FA/checkpoint/security prompts manually.
+5. The resulting session is persisted in the dedicated profile directory.
+
+**Subsequent launches:**
+1. Camoufox reopens the same persistent profile.
+2. If the session is still valid, Facebook is already logged in.
+3. No credentials are requested again.
+
+**Important:** The user's Facebook username/password is NEVER stored in
+project config, source code, environment variables, or automation scripts.
+The user's existing Chrome session is never reused — Camoufox uses its own
+isolated profile.
+
+#### Manual Login Flow
+
+```bash
+# Run the supervised smoke test — opens headed browser
+python -m src.camoufox_smoke_test
+```
+
+If Facebook shows a login form, the browser stays open. Log in manually,
+complete any 2FA, then the session persists for future launches.
+
+#### Read-Only Observation
+
+The Camoufox transport provides read-only observation:
+- Opens Facebook
+- Verifies logged-in state
+- Navigates to the UnattendedBot8300 Page
+- Identifies the correct Page (via ARIA headings / accessible names)
+- Reads recent posts (`div[role='article']` → PostObservation)
+- Reads visible comments (→ CommentObservation)
+- Normalises into the existing `ObservationResult` format
+- Feeds through the existing storage → context assembler → model pipeline
+
+Screenshots and debug artifacts are saved to:
+```
+runtime/browser-references/sessions/<timestamp>/
+```
+Each session has a `manifest.json` with non-sensitive metadata. This directory
+is **gitignored** and never committed.
+
+#### Write Capabilities (Stubbed — Not Active)
+
+`publish_text_status()` and `reply_to_comment()` are implemented as deterministic
+functions but are **stubbed** during this phase. They:
+- Refuse execution in `dry_run` mode
+- Raise `NotImplementedError` in `live` mode (UI automation not yet wired)
+- Are NEVER called automatically — only through the approval queue
+
+The flow for future writes:
+```
+Model decision → DecisionModel validation → SafetyPolicy → RateLimit → ProposedAction → Approval → transport executor
+```
+
+#### Selector Strategy
+
+Facebook changes generated CSS class names frequently. The transport prefers:
+- ARIA roles (`role='article'`, `role='heading'`, `role='button'`)
+- Accessible names and labels
+- Semantic text content
+- `data-testid` attributes (where stable)
+- Stable element relationships
+
+All selectors are centralized in the `SELECTORS` dict in `src/facebook_camoufox.py`.
+Explicit waits (`wait_for_selector`, `wait_for_load_state`) with timeouts are used
+instead of fixed `sleep()` calls.
+
+#### Error Handling
+
+Camoufox failures are classified into specific error types:
+- `NotLoggedInError` — Facebook requires manual login (browser left open)
+- `PageNotFoundError` — Page URL incorrect or page removed
+- `SelectorError` — UI element selector didn't match (layout changed)
+- `CheckpointError` — Facebook security checkpoint (needs manual resolution)
+- `NavigationError` — URL navigation failed or timed out
+- `TransportError` — Generic transport failure
+
+Useful failures trigger a screenshot saved to
+`runtime/browser-references/failures/`. No cookies, tokens, or auth
+material are ever included in logs or screenshots.
+
+### Graph API Transport (Dormant)
+
+The existing `FacebookClient` (`src/fb_client.py`) remains in the project for
+future official Meta integration. When `FACEBOOK_TRANSPORT=graph_api`, the
+transport factory wraps the existing client. This path is not exercised
+during the Camoufox development phase but is structurally complete and
+tested.
 
 ## Meta Developer Dashboard Setup
 

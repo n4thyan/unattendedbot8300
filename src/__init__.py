@@ -14,10 +14,17 @@ from .memory import MemoryStore
 from .proposed_actions import ProposedAction, ProposedActionQueue
 from .wake_cycles import WakeCycle, WakeCycleLogger
 from .safety import SafetyPolicy
+from .facebook_transport import (
+    FacebookTransport, get_transport, supported_transports,
+    TransportError, NotLoggedInError, PageNotFoundError,
+    SelectorError, CheckpointError, NavigationError, TransportUnavailableError,
+)
+from .facebook_camoufox import CamoufoxTransport
+
 
 # Default entry point
 def main():
     """Main entry point for CLI access."""
     import sys
-    from .cli import cli_main
+    from .cli import main as cli_main
     sys.exit(cli_main())

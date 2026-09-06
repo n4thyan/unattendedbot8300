@@ -14,6 +14,14 @@ data/bot.db
 *.db
 *.sqlite
 
+# Browser profile/session/state/cookies/cache/storage (Camoufox)
+data/browser-profile/
+data/browser-profile
+runtime/
+runtime/browser-references/
+*.har
+*.pcap
+
 # Environment
 .env
 .env.local

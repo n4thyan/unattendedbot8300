@@ -23,6 +23,9 @@ test = [
     "pytest-asyncio>=0.24.0,<1",
     "responses>=0.25.0,<1",
 ]
+camoufox = [
+    "camoufox>=0.5.6,<1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
