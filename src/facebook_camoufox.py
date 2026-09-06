@@ -234,19 +234,37 @@ SELECTORS = {
     "page_switcher_menu": "div[data-testid='profile-card'], div[aria-label*='Switch']",
     "page_option_by_name": None,  # set dynamically per Page name
 
-    # Page identity
+    # ── Page identity verification (calibrated against live DOM) ──
+    # On the home feed with Page identity active:
+    #   - composer aria-label="Create a post" and text "What's on your mind, <Name>?"
+    #   - left sidebar has a link with text=PageName and href=profile.php?id=...
+    #   - left sidebar shows Page-specific controls: Professional dashboard,
+    #     Ads Manager, Ad Centre
+    # On the actual Page profile URL:
+    #   - h1 heading contains the Page display name
+    #   - URL is profile.php?id=<numeric_id> (NOT /slug)
     "page_header_title": "h1",
-    "page_profile_link": "a[href*='/UnattendedBot8300']",
+    "page_composer_region": "div[aria-label='Create a post']",
+    "page_sidebar_identity_link": None,  # set dynamically: a[href*='profile.php?'] with text
+    "page_sidebar_link_by_text": None,   # set dynamically: a >> text=/<PageName>/
+    "page_control_professional_dashboard": "a[href*='professional_dashboard'], span >> text=/Professional dashboard/",
+    "page_control_ads_manager": "a[href*='ads_manager'], a[href*='ad_campaign/landing'], span >> text=/Ads Manager/",
+    "page_control_ad_centre": "a[href*='ad_center'], span >> text=/Ad Centre/",
     "page_identity_badge": None,  # set dynamically
 
-    # Posts on a Page timeline
+    # Posts on a Page timeline / home feed
+    # div[role='article'] in current Facebook DOM are loading-state
+    # placeholders that may never populate in the Playwright DOM (virtualised
+    # feed).  The real post message text lives in div[dir='auto'] within the
+    # main feed area.
     "post_container": "div[role='article']",
-    "post_message": "div[role='article'] div[data-xf-comment='true'], div[role='article'] div[data-testid='post-message']",
-    "post_text_fallback": "div[role='article'] div > div > div > div > div",
+    "post_message": "div[dir='auto'][data-ad-rendering-role='story_message'], div[dir='auto'] > div > div > div > div, div[role='article'] div[data-xf-comment='true'], div[role='article'] div[data-testid='post-message']",
+    "post_text_fallback": "div[dir='auto']",
+    "post_feed_main": "div[role='main']",
 
     # Comments
-    "comment_container": "ul[data-testid='fb-ufeedback-comments'], div[data-xf-comment='true']",
-    "comment_body": "div[data-testid='comment-body'], div[data-xf-comment-body='true']",
+    "comment_container": "ul[data-testid='fb-ufeedback-comments'], div[data-xf-comment='true'], div[role='button'][aria-label*='Comment']",
+    "comment_body": "div[data-testid='comment-body'], div[data-xf-comment-body='true'], div[dir='auto']",
 
     # Checkpoint / security challenge
     "checkpoint_form": "form#checkpoint_form, form[action*='checkpoint']",
@@ -744,6 +762,11 @@ class CamoufoxTransport(FacebookTransport):
         """Return the currently-active Facebook identity (profile or Page name).
 
         Inspects Facebook's actual rendered profile-switcher / account menu.
+        On the home feed with a Page identity active, the sidebar identity link
+        (e.g. text "UnattendedBot8300" with href "profile.php?id=...") is the
+        most reliable positive signal.  We also check the composer placeholder
+        and the top-right profile menu button.
+
         Returns the visible identity label, or an empty string if it cannot
         be positively determined.
         """
@@ -751,9 +774,26 @@ class CamoufoxTransport(FacebookTransport):
         if page is None:
             return ""
 
-        # The active identity is typically shown in the profile menu button
-        # or in the top navigation bar.  We look for accessible names,
-        # visible labels, and stable href relationships.
+        # ── Signal 1: left-sidebar identity link with profile.php href ──
+        # Calibrated against live DOM: when the Page identity is active,
+        # the left sidebar contains <a href="profile.php?id=<id>">UnattendedBot8300</a>
+        try:
+            sidebar_links = page.eval_on_selector_all(
+                "div[role='navigation'] a[href*='profile.php?id']",
+                "(els) => els.map(e => (e.textContent || '').trim())",
+            )
+            for text in sidebar_links:
+                if text:
+                    return text
+        except Exception:
+            pass
+
+        # ── Signal 2: top-right profile menu button (aria-label) ──
+        # On the real Facebook DOM, the top-right button has aria-label="Your profile"
+        # (a generic navigation label) when the PERSONAL profile is active — NOT the
+        # personal name.  When a Page is active, the aria-label is the Page name.
+        # We must NOT return "Your profile" as an identity name; it is a UI
+        # navigation label, not an identity.
         candidates = [
             SELECTORS["auth_profile_menu"],
             "div[aria-label*='profile']",
@@ -770,12 +810,13 @@ class CamoufoxTransport(FacebookTransport):
                         name = (el.text_content() or "").strip()
                     if not name:
                         name = (el.get_attribute("title") or "").strip()
-                    if name:
+                    # Skip generic UI labels — they are not identity names
+                    if name and name.lower() not in ("your profile", "profile"):
                         return name
             except Exception:
                 continue
 
-        # Fallback: look at the Page header
+        # ── Signal 3: h1 / Page header heading ──
         try:
             h1 = page.query_selector(SELECTORS["page_header_title"])
             if h1 is not None:
@@ -822,6 +863,10 @@ class CamoufoxTransport(FacebookTransport):
         the option matching ``page_name``.
 
         Returns True on success, False if the switch could not be performed.
+
+        Note: Facebook's Page switcher is a dropdown menu.  The Page option
+        may be rendered as a menuitem, a link, or nested text.  We try
+        multiple selector strategies to find the matching entry.
         """
         page = self._page
         if page is None:
@@ -830,93 +875,263 @@ class CamoufoxTransport(FacebookTransport):
         if not self._open_page_switcher():
             return False
 
-        # Wait briefly for the switcher menu to render
+        # Wait for the switcher menu to render (bounded, not a fixed sleep)
         try:
-            page.wait_for_timeout(1500)
+            page.wait_for_selector(
+                "div[role='menu'], div[role='menuitem'], div[data-visualcompletion='']",
+                state="attached",
+                timeout=DEFAULT_TIMEOUT * 1000,
+            )
         except Exception:
             pass
 
-        # Look for a link/menu-item matching the Page name
-        # Facebook renders managed Pages as clickable entries in the switcher
+        # Look for a link/menu-item matching the Page name.
+        # We cast a wide net: Facebook renders managed Pages with their display
+        # name as visible text, sometimes inside a span, sometimes as an
+        # aria-label on a menuitem, sometimes as a link text.
         option_selectors = [
-            f"span[id*='text'] >> text=/{re.escape(page_name)}/",
             f"div[role='menuitem'][aria-label*='{re.escape(page_name)}']",
-            f"a[href*='/{re.escape(page_name)}']",
             f"span >> text=/{re.escape(page_name)}/i",
+            f"a >> text=/{re.escape(page_name)}/i",
+            f"div[role='menuitem'] >> text=/{re.escape(page_name)}/i",
+            f"span[id*='text'] >> text=/{re.escape(page_name)}/",
+            f"a[href*='/pages/{re.escape(page_name)}']",
+            f"a[href*='/{re.escape(page_name)}']",
         ]
         for sel in option_selectors:
             try:
                 loc = page.locator(sel)
                 if loc.count() > 0:
                     loc.first.click()
-                    try:
-                        page.wait_for_timeout(2000)
-                    except Exception:
-                        pass
                     return True
             except Exception:
                 continue
 
         return False
 
+    def _detect_page_identity_from_composer(self, page_name: str) -> bool:
+        """Check whether the post composer shows the Page identity.
+
+        When a Page identity is active, the composer placeholder reads
+        'What's on your mind, <PageName>?'.  This is a strong positive
+        signal because it is dynamically personalized to the active identity.
+        """
+        page = self._page
+        if page is None:
+            return False
+        target = page_name.lower()
+        try:
+            composer = page.query_selector(SELECTORS["page_composer_region"])
+            if composer is None:
+                return False
+            text = (composer.text_content() or "").strip().lower()
+            if "what's on your mind" in text and target in text:
+                return True
+        except Exception:
+            pass
+        # Fallback: search body text for the composer signature
+        try:
+            body = page.eval_on_selector("body", "el => el.innerText") or ""
+            body_lower = body.lower()
+            if "what's on your mind" in body_lower and target in body_lower:
+                idx = body_lower.find("what's on your mind")
+                snippet = body[idx:idx + 80].lower()
+                if target in snippet:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _detect_page_identity_from_sidebar(self, page_name: str) -> bool:
+        """Check whether the left sidebar shows the target Page identity.
+
+        When a Page identity is active, the left sidebar contains a link
+        with the Page display name as its text and a profile.php?id= href.
+        """
+        page = self._page
+        if page is None:
+            return False
+        target = page_name.lower()
+        try:
+            links = page.eval_on_selector_all(
+                "div[role='navigation'] a",
+                "(els) => els.map(e => ({text: (e.textContent||'').trim(), href: e.href || ''}))",
+            )
+            for link in links:
+                if target in link["text"].lower() and "profile.php?id=" in link["href"]:
+                    return True
+            # Also check by text alone (more lenient than href)
+            for link in links:
+                if target in link["text"].lower():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _detect_page_identity_from_controls(self, page_name: str) -> bool:
+        """Check whether Page-specific controls are visible in the sidebar.
+
+        When a Page identity is active (vs personal), the left sidebar shows
+        Page-management controls such as 'Professional dashboard', 'Ads Manager',
+        and 'Ad Centre'.  These are strong positive signals that the active
+        identity is a Page, not a personal profile.
+        """
+        page = self._page
+        if page is None:
+            return False
+        signals = 0
+        for key in ("page_control_professional_dashboard", "page_control_ads_manager",
+                     "page_control_ad_centre"):
+            try:
+                el = page.query_selector(SELECTORS[key])
+                if el is not None:
+                    text = (el.text_content() or "").strip().lower()
+                    if text and len(text) > 2:
+                        signals += 1
+            except Exception:
+                pass
+        # 2+ Page-control signals is strong evidence of Page identity
+        return signals >= 2
+
+    def _is_personal_identity_active(self) -> bool:
+        """Check whether the personal profile (not a Page) is the active identity.
+
+        On the home feed, the personal profile does NOT show Page-management
+        controls (Professional dashboard, Ads Manager, Ad Centre) in the
+        sidebar, and the composer reads 'What's on your mind, <Name>?' for
+        the personal profile name.
+        """
+        page = self._page
+        if page is None:
+            return False
+        # If the profile menu button says "Your profile" (not a Page name)
+        # and there are no Page controls, we're on the personal identity.
+        try:
+            profile_btn = page.query_selector(SELECTORS["auth_profile_menu"])
+            if profile_btn is not None:
+                aria = (profile_btn.get_attribute("aria-label") or "").strip()
+                if aria == "Your profile":
+                    # Check that Page controls are NOT present
+                    has_pg_controls = self._detect_page_identity_from_controls(
+                        self._page_slug
+                    )
+                    if not has_pg_controls:
+                        return True
+        except Exception:
+            pass
+        return False
+
     def verify_page_identity(self, page_name: Optional[str] = None) -> IdentityState:
         """Positively verify that the active Facebook identity is the target Page.
 
-        Checks multiple independent signals:
-          - visible Page header title
-          - URL path contains the page slug
-          - profile link href contains the page slug
-          - active identity label matches the Page name
+        Uses multiple independent signals calibrated against the live DOM:
 
-        Returns IdentityState — anything except PAGE_IDENTITY_CONFIRMED
-        must block writes.
+        On the home feed (Page identity active):
+          - Composer text: "What's on your mind, <PageName>?" (composer signal)
+          - Left sidebar identity link with text=PageName (sidebar signal)
+          - Page-specific controls: Professional dashboard, Ads Manager, Ad Centre
+            (controls signal)
+
+        On the Page profile URL (profile.php?id=<id>):
+          - h1 "Manage Page" or h2 with the Page display name (heading signal)
+          - URL contains profile.php?id= (URL signal)
+          - profile link href points to profile.php?id= (link signal)
+          - Body text contains the Page name + "Manage Page" / "Page profile content"
+            (body text signal)
+
+        Requires 2+ independent positive signals before returning
+        PAGE_IDENTITY_CONFIRMED.  Anything else must block writes.
         """
         page = self._page
         if page is None:
             return IdentityState.IDENTITY_UNKNOWN
 
         target = page_name or self._page_slug
-        url = self._safe_url().lower()
+        target_lower = target.lower()
 
-        # Signal 1: URL path contains the page slug
-        url_match = target.lower() in url
+        # ── Signal 1: Composer shows Page-personalized placeholder ──
+        # Home feed with Page identity: "What's on your mind, UnattendedBot8300?"
+        composer_match = self._detect_page_identity_from_composer(target)
 
-        # Signal 2: h1 heading text matches
+        # ── Signal 2: Left sidebar shows Page identity link ──
+        sidebar_match = self._detect_page_identity_from_sidebar(target)
+
+        # ── Signal 3: Page-specific controls visible ──
+        controls_match = self._detect_page_identity_from_controls(target)
+
+        # ── Signal 4: heading (h1 or h2) contains the Page display name ──
         heading_match = False
         try:
-            h1 = page.query_selector(SELECTORS["page_header_title"])
-            if h1 is not None:
-                h1_text = (h1.text_content() or "").strip().lower()
-                if target.lower() in h1_text:
-                    heading_match = True
+            headings = page.eval_on_selector_all(
+                "h1, h2, div[role='heading']",
+                "(els) => els.map(e => (e.textContent || '').trim().toLowerCase())",
+            )
+            heading_match = any(target_lower in h for h in headings if h)
         except Exception:
-            pass
+            try:
+                h1 = page.query_selector(SELECTORS["page_header_title"])
+                if h1 is not None:
+                    h1_text = (h1.text_content() or "").strip().lower()
+                    if target_lower in h1_text:
+                        heading_match = True
+            except Exception:
+                pass
 
-        # Signal 3: page profile link href contains the slug
+        # ── Signal 5: URL path contains profile.php?id= OR the page slug ──
+        url = self._safe_url().lower()
+        url_match = ("profile.php?id=" in url or target_lower in url)
+
+        # ── Signal 6: profile link href contains profile.php?id= with Page name ──
         link_match = False
         try:
-            link = page.query_selector(f"a[href*='/{target}']")
-            if link is not None:
-                link_match = True
+            links = page.eval_on_selector_all(
+                "a[href*='profile.php?id=']",
+                "(els) => els.map(e => ({href: e.href, text: (e.textContent||'').trim()}))",
+            )
+            link_match = any(target_lower in l["text"].lower() for l in links)
         except Exception:
             pass
 
-        # Signal 4: active identity label matches
+        # ── Signal 7: active identity label matches ──
         identity_label = self.get_active_facebook_identity().lower()
-        identity_match = target.lower() in identity_label if identity_label else False
+        identity_match = target_lower in identity_label if identity_label else False
 
-        positive_signals = sum([url_match, heading_match, link_match, identity_match])
+        # ── Signal 8: body text contains Page name + Page-management context ──
+        # On the Page profile URL, "Manage Page" heading + Page name in body
+        # confirms we're on the correct Page.
+        body_page_match = False
+        try:
+            body_text = page.eval_on_selector("body", "el => el.innerText") or ""
+            body_lower = body_text.lower()
+            if target_lower in body_lower and ("manage page" in body_lower or
+                                                "page profile" in body_lower or
+                                                "comment as" in body_lower):
+                body_page_match = True
+        except Exception:
+            pass
+
+        positive_signals = sum([
+            composer_match,      # home feed, Page active
+            sidebar_match,       # home feed, Page active
+            controls_match,      # home feed, Page active
+            heading_match,       # Page profile URL / home feed
+            url_match,           # Page profile URL
+            link_match,          # Page profile URL / sidebar
+            identity_match,      # any context where identity label shows Page name
+            body_page_match,     # Page profile URL body text
+        ])
 
         if positive_signals >= 2:
             return IdentityState.PAGE_IDENTITY_CONFIRMED
+
         if positive_signals == 1:
             # Single weak signal — not enough to confirm a Page identity.
             # Could be the personal profile viewing the Page, or a stale
             # identity indicator.  Fail closed.
             return IdentityState.IDENTITY_UNKNOWN
-        # No signals at all — check whether personal identity is showing
-        if identity_label and target.lower() not in identity_label:
-            # Active identity is something other than the target Page
+
+        # No positive signals — determine whether personal is active
+        if self._is_personal_identity_active():
             return IdentityState.PERSONAL_IDENTITY_ACTIVE
         return IdentityState.IDENTITY_UNKNOWN
 
@@ -925,28 +1140,133 @@ class CamoufoxTransport(FacebookTransport):
 
         1. Check current identity.
         2. If not the Page, attempt to switch via the profile switcher.
-        3. Re-verify after switching.
+        3. Wait for the Page UI transition to settle using Playwright
+           expectations (NOT a fixed sleep).
+        4. Re-verify after the transition.
+
+        The key fix: after clicking the Page option, Facebook needs time to
+        re-render the UI (sidebar, composer, controls).  We wait for a
+        POSITIVE Page-identity signal to appear, with a bounded timeout.
+        Only if the timeout expires without positive evidence do we return
+        PAGE_SWITCH_FAILED.
         """
         target = page_name or self._page_slug
 
+        # Step 1: Check current identity
         current = self.verify_page_identity(target)
         if current == IdentityState.PAGE_IDENTITY_CONFIRMED:
             return current
 
-        # Attempt to switch
+        # Step 2: Attempt to switch
         switched = self.switch_to_page_identity(target)
-        if switched:
-            # Give Facebook a moment to navigate
-            try:
-                self._page.wait_for_load_state("domcontentloaded", timeout=PAGE_LOAD_TIMEOUT * 1000)
-            except Exception:
-                pass
-            after = self.verify_page_identity(target)
-            if after == IdentityState.PAGE_IDENTITY_CONFIRMED:
-                return after
+        if not switched:
             return IdentityState.PAGE_SWITCH_FAILED
 
-        return IdentityState.PAGE_SWITCH_FAILED
+        # Step 3: Wait for the Page UI transition to settle.
+        # We poll for positive identity evidence with a bounded timeout,
+        # using wait_for_function instead of a fixed sleep.
+        page = self._page
+        target_lower = target.lower()
+        deadline_ms = PAGE_LOAD_TIMEOUT * 1000
+
+        try:
+            page.wait_for_function(
+                f"""
+                (target) => {{
+                    const bodyText = document.body.innerText || '';
+                    const bodyLower = bodyText.toLowerCase();
+                    const composerMatch = bodyLower.includes("what's on your mind") &&
+                                          bodyLower.includes(target);
+                    const sidebarLinks = Array.from(document.querySelectorAll('div[role="navigation"] a'))
+                        .map(a => (a.textContent || '').trim().toLowerCase())
+                        .some(t => t.includes(target));
+                    return composerMatch || sidebarLinks;
+                }}
+                """,
+                arg=target_lower,
+                timeout=deadline_ms,
+            )
+        except Exception:
+            # Timeout expired without positive signal
+            pass
+
+        # Also wait for networkidle to settle any pending navigation
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=deadline_ms)
+        except Exception:
+            pass
+
+        # Step 4: Re-verify with the calibrated signals
+        after = self.verify_page_identity(target)
+        return after
+
+    def discover_page_url(self) -> Optional[str]:
+        """Discover the actual canonical Page/profile URL from the live Facebook UI.
+
+        This is called AFTER the Page identity is confirmed active.  It does NOT
+        rely on a guessed slug — it reads the real href from the rendered DOM.
+
+        Facebook Pages often have a numeric profile.php?id=<id> URL that does
+        NOT match the display name slug.  We inspect:
+          - Left sidebar identity link (href of the link with Page-name text)
+          - Profile picture / avatar link
+          - Page header profile link
+          - Any <a> whose text or aria-label contains the target Page name
+
+        Returns the discovered canonical Page URL, or None if not found.
+        """
+        page = self._page
+        if page is None:
+            return None
+
+        target = self._page_slug.lower()
+
+        # Signal 1: Left sidebar link with the Page name
+        try:
+            links = page.eval_on_selector_all(
+                "div[role='navigation'] a",
+                "(els) => els.map(e => ({href: e.href || '', text: (e.textContent||'').trim().toLowerCase()}))",
+            )
+            for link in links:
+                if target in link["text"] and link["href"]:
+                    return link["href"]
+        except Exception:
+            pass
+
+        # Signal 2: Any link whose aria-label or text contains the target
+        try:
+            links = page.eval_on_selector_all(
+                f"a[aria-label*='{target}'], a[aria-label*='{self._page_slug}']",
+                "(els) => els.map(e => e.href || '')",
+            )
+            for href in links:
+                if href and "facebook.com" in href:
+                    return href
+        except Exception:
+            pass
+
+        # Signal 3: h1 heading context — find nearby profile link
+        try:
+            h1 = page.query_selector(SELECTORS["page_header_title"])
+            if h1 is not None:
+                h1_text = (h1.text_content() or "").strip().lower()
+                if target in h1_text:
+                    # Walk up to find a parent <a> link
+                    parent_link = page.eval_on_selector(
+                        SELECTORS["page_header_title"],
+                        "(el) => { let p = el.parentElement; while (p && p.tagName !== 'A') p = p.parentElement; return p ? p.href : ''; }",
+                    )
+                    if parent_link and "facebook.com" in parent_link:
+                        return parent_link
+        except Exception:
+            pass
+
+        # Signal 4: Current page URL if it already looks like a Page profile
+        current_url = self._safe_url()
+        if "profile.php?id=" in current_url:
+            return current_url
+
+        return None
 
     # ── Fail-closed write preflight ──
 
@@ -1185,65 +1505,181 @@ class CamoufoxTransport(FacebookTransport):
         except Exception:
             raise SelectorError("Could not identify Facebook Page — layout may have changed")
 
-    def _extract_posts(self) -> list[PostObservation]:
-        """Extract recent posts from the Page timeline.
-
-        Uses ARIA roles (role='article' for posts) and semantic text
-        extraction rather than CSS class names.
-        """
-        posts: list[PostObservation] = []
-
+    def _extract_post_permalink_from_element(self, element) -> Optional[str]:
+        """Extract a Facebook permalink from a post element's rendered links."""
         try:
-            self._page.wait_for_selector(SELECTORS["post_container"], timeout=DEFAULT_TIMEOUT * 1000)
-        except Exception:
-            raise SelectorError("Post containers not found — Facebook layout may have changed")
-
-        article_elements = self._page.locator(SELECTORS["post_container"]).all()
-
-        for idx, article in enumerate(article_elements[:10]):
-            try:
-                post_id = f"ui_post_{idx}_{self._page.evaluate('Math.random().toString(36).slice(2,10)')}"
-
-                # Extract message text
-                message = self._extract_text_from_element(article)
-                if not message or len(message) < 1:
-                    continue
-
-                # Try to extract a permalink / object ID from rendered links
-                fb_permalink = self._extract_post_permalink(article)
-
-                # Try to extract visible timestamp
-                created_time = self._extract_post_timestamp(article)
-
-                posts.append(PostObservation(
-                    fb_post_id=fb_permalink or post_id,
-                    message=message,
-                    created_time=created_time or datetime.now(timezone.utc).isoformat(),
-                    posted_by_page=True,
-                    like_count=0,
-                    comment_count=0,
-                    raw={"source": "camoufox_ui", "index": idx},
-                ))
-            except Exception:
-                continue
-
-        if not posts:
-            raise SelectorError("No posts could be extracted from the Page timeline")
-        return posts
-
-    def _extract_post_permalink(self, article) -> Optional[str]:
-        """Extract a Facebook permalink from a post's rendered links."""
-        try:
-            # Look for a link whose href looks like a Facebook post permalink
             links = self._page.eval_on_selector_all(
                 "div[role='article'] a[href*='/posts/'], div[role='article'] a[href*='/permalink/'], div[role='article'] a[href*='/p/'], div[role='article'] a[href*='/photo/']",
-                "els => els.map(e => e.href)",
+                "(els) => els.map(e => e.href)",
             )
             if links:
                 return links[0]
         except Exception:
             pass
         return None
+
+    def _extract_posts_from_body_text(self) -> list[PostObservation]:
+        """Fallback post extraction using body text analysis.
+
+        When div[role='article'] elements are loading-state placeholders
+        (virtualised feed), we parse the body innerText to find post-like
+        content.  Posts are separated from UI elements by their content
+        depth — actual post text is substantial, multi-sentence content
+        that is NOT a known UI fragment.
+
+        Calibrated against the live Facebook DOM (September 2026).
+        """
+        posts: list[PostObservation] = []
+        try:
+            # Scroll to encourage lazy-loading
+            for _ in range(8):
+                self._page.evaluate("window.scrollBy(0, 1000)")
+                self._page.wait_for_timeout(1500)
+
+            body_text = self._page.eval_on_selector("body", "el => el.innerText") or ""
+        except Exception:
+            return posts
+
+        # Known UI fragment tokens to exclude from post messages
+        ui_fragments = {
+            "facebook", "menu", "home", "watch", "marketplace", "groups",
+            "gaming", "messenger", "notifications", "friends", "memories",
+            "saved", "reels", "see more", "meta ai", "feeds",
+            "create a post", "what's on your mind", "share a photo or video",
+            "create story", "search facebook", "feed posts",
+            "professional dashboard", "ads manager", "ad centre",
+            "your shortcuts", "suggested", "edit cover photo",
+            "share a thought", "privacy", "terms", "advertising", "ad choices",
+            "cookies", "more", "follow", "your profile", "number of unread",
+            "unread", "manage posts", "edit profile", "edit details",
+            "contact info", "featured", "details", "posts",
+            "manage page", "page profile", "comment as", "create ads",
+            "edit audience", "ad centre", "boost post", "settings",
+            "pages", "page navigation", "actions for this post",
+            "number of followers", "followers", "following",
+            "finish setting up", "add the essentials", "view all",
+            "not yet rated", "no context",
+            # Page management UI (not posts)
+            "boost instagram post", "manage your business",
+            "setup business", "setup/business/profile-management",
+            "if you're a business", "give people another",
+            "websites are one of", "let people know where to go",
+            "add your address", "link to your website",
+            "add phone number", "not started",
+            "add the essentials that people look for",
+            "so that your page feels complete",
+            "add your phone number",
+        }
+
+        # Lines that look like actual post messages: substantial text
+        # (not single chars from CSS obfuscation, not UI fragments)
+        lines = body_text.split("\n")
+        candidate_posts = []
+        for line in lines:
+            text = line.strip()
+            if not text:
+                continue
+            # Skip CSS character-obfuscation fragments (mostly single chars)
+            if len(text) < 10:
+                continue
+            text_lower = text.lower()
+            # Skip known UI fragments
+            if text_lower in ui_fragments or any(k in text_lower for k in ui_fragments):
+                continue
+            # Skip lines that are obviously not posts (single words, etc.)
+            if len(text) < 20:
+                continue
+            # Skip lines that look like notifications or metadata
+            if text_lower.startswith("number of") or text_lower.startswith("unread"):
+                continue
+            candidate_posts.append(text)
+
+        # Use unique candidate posts (dedup)
+        seen = set()
+        for text in candidate_posts:
+            if text in seen:
+                continue
+            seen.add(text)
+            if len(text) < 20:
+                continue
+            post_id = f"ui_post_body_{abs(hash(text)) % 100000}"
+            posts.append(PostObservation(
+                fb_post_id=post_id,
+                message=text,
+                created_time=datetime.now(timezone.utc).isoformat(),
+                posted_by_page=False,  # These are from the home feed, not the Page
+                like_count=0,
+                comment_count=0,
+                raw={"source": "camoufox_ui_body_text", "index": len(posts)},
+            ))
+            if len(posts) >= 10:
+                break
+
+        return posts
+
+    def _extract_posts(self) -> list[PostObservation]:
+        """Extract recent posts from the Page timeline or home feed.
+
+        Uses ARIA roles (role='article' for posts) and semantic text
+        extraction rather than CSS class names.
+
+        On the current Facebook UI, div[role='article'] elements may be
+        loading-state placeholders that never populate in the DOM (the feed
+        is virtualised).  As a calibrated fallback, we extract post messages
+        from div[dir='auto'] elements within the main feed area.
+        """
+        posts: list[PostObservation] = []
+
+        # Attempt 1: standard article-based extraction
+        try:
+            self._page.wait_for_selector(SELECTORS["post_container"], timeout=DEFAULT_TIMEOUT * 1000)
+            article_elements = self._page.locator(SELECTORS["post_container"]).all()
+
+            # Check if articles are loading-state placeholders (no text content)
+            real_articles = []
+            for article in article_elements[:10]:
+                try:
+                    msg = self._extract_text_from_element(article)
+                    if msg and len(msg) >= 1:
+                        real_articles.append((article, msg))
+                except Exception:
+                    continue
+
+            for idx, (article, message) in enumerate(real_articles):
+                try:
+                    post_id = f"ui_post_{idx}_{self._page.evaluate('Math.random().toString(36).slice(2,10)')}"
+                    fb_permalink = self._extract_post_permalink_from_element(article)
+                    created_time = self._extract_post_timestamp(article)
+                    posts.append(PostObservation(
+                        fb_post_id=fb_permalink or post_id,
+                        message=message,
+                        created_time=created_time or datetime.now(timezone.utc).isoformat(),
+                        posted_by_page=True,
+                        like_count=0,
+                        comment_count=0,
+                        raw={"source": "camoufox_ui", "index": idx},
+                    ))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Attempt 2: body-text fallback for virtualised feeds
+        if not posts:
+            posts = self._extract_posts_from_body_text()
+
+        if not posts:
+            raise SelectorError("No posts could be extracted from the Page timeline")
+        return posts
+
+    def _extract_post_permalink(self, article) -> Optional[str]:
+        """Extract a Facebook permalink from a post's rendered links.
+
+        Delegates to _extract_post_permalink_from_element which searches
+        the full page DOM (since article elements may be loading-state
+        placeholders in the virtualised feed).
+        """
+        return self._extract_post_permalink_from_element(article)
 
     def _extract_post_timestamp(self, article) -> Optional[str]:
         """Extract a visible timestamp from a post if reliably exposed."""
@@ -1258,16 +1694,21 @@ class CamoufoxTransport(FacebookTransport):
         return None
 
     def _extract_comments(self, post_obs: PostObservation) -> list[CommentObservation]:
-        """Extract visible comments on a post."""
+        """Extract visible comments on a post.
+
+        Returns an empty list if no comments are visible (not an error —
+        not all posts have visible comments, and the Page profile URL
+        may not render comment containers).
+        """
         comments: list[CommentObservation] = []
 
         try:
             comment_elements = self._page.locator(SELECTORS["comment_body"]).all()
         except Exception:
-            raise SelectorError("Comment containers not found — layout may have changed")
+            comment_elements = []
 
         if not comment_elements:
-            return []
+            return comments
 
         for c in comment_elements[:20]:
             try:

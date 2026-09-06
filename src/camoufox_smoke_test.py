@@ -196,27 +196,54 @@ def smoke_test():
         print(f"   Identity state: {identity_state.value}")
         save_ss("identity-check", state=identity_state.value)
 
+        # Step 7b: Capture the immediate post-switch DOM state
+        save_ss("immediately-after-switch",
+                state=identity_state.value if identity_state == IdentityState.PAGE_IDENTITY_CONFIRMED
+                else "switch_failed")
+
+        # Step 7c: If identity confirmed via switch, discover actual Page URL
+        discovered_page_url = None
         if identity_state == IdentityState.PAGE_IDENTITY_CONFIRMED:
-            print("   STATUS: Page identity already confirmed (no switch needed).")
+            print("   STATUS: Page identity confirmed via switcher (no fallback needed).")
             save_ss("page-identity-selected", state="page_identity_confirmed")
+
+            # Discover the ACTUAL canonical Page/profile URL from the live DOM.
+            # The display name slug does NOT necessarily equal the URL slug.
+            try:
+                discovered_page_url = transport.discover_page_url()
+                if discovered_page_url:
+                    print(f"   Discovered Page URL: {discovered_page_url}")
+                else:
+                    discovered_page_url = None
+            except Exception as e:
+                print(f"   Note: could not discover Page URL from DOM ({e})")
+                discovered_page_url = None
         elif identity_state == IdentityState.PAGE_SWITCH_FAILED:
             print("   STATUS: Page switch failed via switcher UI.")
             print("   Will attempt direct navigation to the Page URL instead.")
         else:
             print(f"   STATUS: Identity not confirmed by switcher ({identity_state.value}).")
+            print("   Will attempt direct navigation to the Page URL instead.")
 
-        # Step 8: Navigate to the UnattendedBot8300 Page
-        page_url = config.facebook_page_url or DEFAULT_PAGE_URL
+        # Step 8: Navigate to the Page
+        # Use the discovered URL if available; otherwise fall back to config.
+        page_url = discovered_page_url or (config.facebook_page_url or DEFAULT_PAGE_URL)
         print(f"8. Navigating to Page: {page_url}")
+        if discovered_page_url:
+            save_ss("actual-page-profile-open", state="discovered_url", action="navigate_to_page")
+        else:
+            save_ss("page-open", state="page_open", action="navigate_to_page")
         page.goto(page_url, wait_until="domcontentloaded", timeout=30000)
         print(f"   URL: {page.url}")
         print(f"   Title: {page.title() or ''}")
-        save_ss("page-open", state="page_open", action="navigate_to_page")
 
         # Step 9: Verify correct Page loaded
         print("9. Verifying Page identity after navigation...")
         identity = transport.verify_page_identity(target_slug)
         print(f"   Identity: {identity.value}")
+        save_ss("page-verified",
+                state="page_identity_confirmed" if identity == IdentityState.PAGE_IDENTITY_CONFIRMED
+                else identity.value)
 
         if identity != IdentityState.PAGE_IDENTITY_CONFIRMED:
             # Check for Facebook error text
@@ -236,7 +263,6 @@ def smoke_test():
             return
 
         print("   STATUS: Page identity CONFIRMED.")
-        save_ss("page-verified", state="page_identity_confirmed")
 
         # Step 10: Read recent posts
         print("10. Reading recent posts...")
@@ -245,7 +271,7 @@ def smoke_test():
             print(f"   Found {len(posts)} recent posts")
             for i, p in enumerate(posts[:5]):
                 print(f"   Post {i+1}: {p.message[:100]}...")
-            save_ss("recent-posts-detected", state="posts_extracted")
+            save_ss("posts-detected", state="posts_extracted")
         except Exception as e:
             print(f"   NOTE: No posts detected ({e})")
             posts = []
@@ -264,7 +290,7 @@ def smoke_test():
         for i, c in enumerate(all_comments[:5]):
             print(f"   Comment {i+1}: {c.from_name}: {c.message[:80]}...")
         if all_comments:
-            save_ss("comments-open", state="comments_detected")
+            save_ss("comments-detected", state="comments_detected")
         else:
             save_ss("no-comments-detected", state="no_comments")
 

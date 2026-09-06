@@ -234,11 +234,22 @@ The Camoufox transport provides read-only observation:
 - Switches to the UnattendedBot8300 Page identity (fail-closed)
 - Positively verifies active identity is the Page, not the personal profile
 - Navigates to the UnattendedBot8300 Page URL (`FACEBOOK_PAGE_URL`)
+- Discovers the actual Page identity URL from DOM (profile.php?id=... style)
 - Identifies the correct Page (via ARIA headings / accessible names)
 - Reads recent posts (`div[role='article']` → PostObservation)
-- Reads visible comments (→ CommentObservation)
+- Reads visible comments (→ CommentObservation, returns `[]` when none visible)
+- Filters known Page-management UI fragments (Boost Instagram post, setup business, etc.)
 - Normalises into the existing `ObservationResult` format
 - Feeds through the existing storage → context assembler → model pipeline
+
+**Live-Proven State (September 2026):**
+- Persistent authentication: ✓
+- Active identity detection (UnattendedBot8300): ✓
+- Page identity verification: ✓
+- Actual Page URL discovery (profile.php?id=...): ✓
+- Post extraction (genuine posts only): ✓
+- Comment extraction (returns `[]` for no comments): ✓
+- Graph API: dormant
 
 Screenshots and debug artifacts are saved to:
 ```

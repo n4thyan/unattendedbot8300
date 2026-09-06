@@ -154,12 +154,16 @@ def test_config_transport_properties(temp_config):
 # ── Camoufox adapter: mocked observation extraction ───────────────────
 
 def _make_authed_mock_page(page_title="UnattendedBot8300 - Facebook",
-                           page_url="https://www.facebook.com/UnattendedBot8300"):
-    """Build a mock Playwright page representing an AUTHENTICATED Facebook session.
+                           page_url="https://www.facebook.com/profile.php?id=61594201976549"):
+    """Build a mock Playwright page representing an AUTHENTICATED Facebook session
+    with the UnattendedBot8300 Page identity ACTIVE (on the home feed).
 
-    The mock provides positive authenticated UI evidence:
-      - a profile menu button (aria-label contains 'profile')
-      - a Home navigation link
+    Calibrated against the real Facebook DOM (see runtime/browser-references/calibration/).
+    Positive authenticated+Page-identity evidence:
+      - composer aria-label="Create a post", text contains "What's on your mind, UnattendedBot8300?"
+      - left sidebar: <a href="profile.php?id=...">UnattendedBot8300</a>
+      - left sidebar: "Professional dashboard", "Ads Manager", "Ad Centre" links
+      - profile menu button: aria-label="Your profile"
       - no login form elements
     """
     mock_page = MagicMock()
@@ -167,7 +171,8 @@ def _make_authed_mock_page(page_title="UnattendedBot8300 - Facebook",
     mock_page.title.return_value = page_title
 
     # query_selector: return authenticated UI elements for auth selectors,
-    # return None for login/checkpoint forms.
+    # return None for login/checkpoint forms, and return real elements for
+    # Page-identity signals.
     def query_selector(selector):
         sel_lower = selector.lower()
         # Login-form selectors → None (not logged out)
@@ -179,17 +184,37 @@ def _make_authed_mock_page(page_title="UnattendedBot8300 - Facebook",
             return None
         # Authenticated UI evidence
         if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
-            return MagicMock()  # profile menu button present
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
         if "auth_home_link" in sel_lower:
             return MagicMock()
         if "auth_watch_link" in sel_lower:
             return MagicMock()
         if "auth_feed_composer" in sel_lower:
             return MagicMock()
-        # Page header title
+        # Page identity: composer region
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, UnattendedBot8300?"
+            return el
+        # Page identity: page header title (h1)
         if "page_header_title" in sel_lower or sel_lower == "h1":
             el = MagicMock()
             el.text_content.return_value = "UnattendedBot8300"
+            return el
+        # Page identity: control selectors
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Professional dashboard"
+            return el
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ads Manager"
+            return el
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ad Centre"
             return el
 
     mock_page.query_selector.side_effect = query_selector
@@ -198,10 +223,41 @@ def _make_authed_mock_page(page_title="UnattendedBot8300 - Facebook",
     mock_page.wait_for_timeout = MagicMock()
     mock_page.locator = MagicMock()
 
+    # eval_on_selector_all: support the new identity-verification lookups
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        expr_lower = expression.lower() if expression else ""
+        # Check if this is the dict extraction (href + text) used by verifiers
+        if "profile.php?id" in sel_lower and "href" in expr_lower and "text" in expr_lower:
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "UnattendedBot8300"},
+            ]
+        # Text-only extraction (used by get_active_facebook_identity)
+        if "profile.php?id" in sel_lower and "href" not in expr_lower:
+            return ["UnattendedBot8300"]
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            if "href" in expr_lower and "text" in expr_lower:
+                return [
+                    {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                     "text": "UnattendedBot8300"},
+                    {"href": "https://www.facebook.com/professional_dashboard/?ref=tab_bar",
+                     "text": "Professional dashboard"},
+                    {"href": "https://www.facebook.com/ad_campaign/landing.php?placement=bkmk_admgr",
+                     "text": "Ads Manager"},
+                ]
+            # text-only
+            return ["UnattendedBot8300", "Professional dashboard", "Ads Manager"]
+        return []
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+
     # get_by_role for page identification
     mock_heading = MagicMock()
     mock_heading.text_content.return_value = "UnattendedBot8300"
     mock_page.get_by_role.return_value = mock_heading
+    mock_page.eval_on_selector = MagicMock(return_value="")
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
 
     return mock_page
 
@@ -241,6 +297,86 @@ def _make_loggedout_mock_page():
     mock_page.wait_for_load_state = MagicMock()
     mock_page.goto = MagicMock()
     mock_page.locator = MagicMock()
+    mock_page.eval_on_selector_all = MagicMock(return_value=[])
+    mock_page.eval_on_selector = MagicMock(return_value="")
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    return mock_page
+
+
+def _make_personal_mock_page():
+    """Build a mock Playwright page representing an AUTHENTICATED session
+    with the PERSONAL profile (Nathan May) active -- NOT the Page identity.
+
+    Calibrated against the real Facebook DOM (see
+    runtime/browser-references/calibration/).  Positive authenticated
+    evidence but NO Page-identity signals:
+      - profile menu button: aria-label="Your profile"
+      - composer: "What's on your mind, Nathan?"
+      - NO Page controls (Professional dashboard, Ads Manager, Ad Centre)
+      - NO sidebar link with "UnattendedBot8300"
+    """
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "(1) Facebook"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
+            return None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return None
+        # Authenticated UI evidence
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        # Composer region -- personal identity
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, Nathan?"
+            return el
+        # Page header title (h1) -- NOT present on personal feed
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            return None
+        # Page control selectors -- NOT present for personal identity
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            return None
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            return None
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            return None
+        return None
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.locator = MagicMock()
+
+    # eval_on_selector_all: sidebar links for personal identity (no Page name)
+    def eval_all(selector, expression):
+        sel_lower = selector.lower()
+        if "profile.php?id" in sel_lower:
+            return []  # no profile.php links for personal identity
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            return [
+                {"href": "https://www.facebook.com/professional_dashboard/?ref=tab_bar",
+                 "text": "Professional dashboard"},
+            ]
+        return []
+    mock_page.eval_on_selector_all.side_effect = eval_all
+    mock_page.eval_on_selector = MagicMock(return_value="")
+    mock_page.get_by_role.return_value = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
     return mock_page
 
 
@@ -952,16 +1088,27 @@ def test_wrong_page_detection(temp_config):
             return None
         # Authenticated UI
         if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
-            return MagicMock()
-        # Page header title — shows wrong page name
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        # Page header title -- shows wrong page name
         if "page_header_title" in sel_lower:
             el = MagicMock()
             el.text_content.return_value = "SomeOtherPage"
+            return el
+        # No Page identity signals
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, Nathan?"
             return el
         return None
     mock_page.query_selector.side_effect = query_selector
     mock_page.get_by_role.return_value.text_content.return_value = "SomeOtherPage"
     mock_page.wait_for_load_state = MagicMock()
+    mock_page.eval_on_selector_all = MagicMock(return_value=[])
+    mock_page.eval_on_selector = MagicMock(return_value="")
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
 
     transport._page = mock_page
     result = transport.verify_page_identity()
@@ -1146,5 +1293,811 @@ def test_page_url_env_override():
         del os.environ["FACEBOOK_PAGE_SLUG"]
 
 
+# ── Regression tests for calibrated live Facebook DOM behaviour ───────────
+#
+# These tests model the ACTUAL calibrated DOM behaviour observed on the
+# real Facebook UI (September 2026), not the old guessed Facebook structure.
+# They use brittle-CSS-free, ARIA/semantic-based mocks.
+
+def _make_homefeed_page_identity_active():
+    """Mock page: home feed (facebook.com/) with UnattendedBot8300 Page identity active.
+
+    Critical: the URL is /facebook.com/ (NOT a Page profile URL).  Identity
+    is proven by composer text, sidebar link, and Page controls alone — never
+    by URL slug match.
+    """
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "UnattendedBot8300 - Facebook"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
+            return None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return None
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, UnattendedBot8300?"
+            return el
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            el = MagicMock()
+            el.text_content.return_value = "UnattendedBot8300"
+            return el
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Professional dashboard"
+            return el
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ads Manager"
+            return el
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ad Centre"
+            return el
+        return None
+
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        expr_lower = (expression or "").lower()
+        # Heading extraction: h1, h2, div[role='heading']
+        if "h1" in sel_lower and "h2" in sel_lower:
+            return ["unattendedbot8300"]
+        if "div[role='heading']" in sel_lower:
+            return ["unattendedbot8300"]
+        # profile.php links — check BEFORE navigation (selector may contain both)
+        if "profile.php?id" in sel_lower and "href" in expr_lower:
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "unattendedbot8300"},
+            ]
+        if "profile.php?id" in sel_lower and "href" not in expr_lower:
+            return ["UnattendedBot8300"]
+        # Sidebar navigation links
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            if "href" in expr_lower and "text" in expr_lower:
+                return [
+                    {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                     "text": "unattendedbot8300"},
+                    {"href": "https://www.facebook.com/professional_dashboard/?ref=tab_bar",
+                     "text": "professional dashboard"},
+                    {"href": "https://www.facebook.com/ad_campaign/landing.php",
+                     "text": "ads manager"},
+                ]
+            return ["UnattendedBot8300", "Professional dashboard", "Ads Manager"]
+        # aria-label match (discover_page_url signal 2)
+        if "aria-label" in sel_lower:
+            return ["https://www.facebook.com/profile.php?id=61594201976549"]
+        return []
+
+    def eval_on_selector(selector, expression):
+        if "body" in selector.lower():
+            return ("UnattendedBot8300\n"
+                    "Professional dashboard\n"
+                    "Ads Manager\n"
+                    "Ad Centre\n"
+                    "What's on your mind, UnattendedBot8300?\n"
+                    "comment as\n")
+        return ""
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+    mock_page.eval_on_selector.side_effect = eval_on_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.locator = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    mock_page.get_by_role.return_value.text_content.return_value = "UnattendedBot8300"
+    return mock_page
+
+
+def _make_controls_only_page():
+    """Mock page: shows Page-management controls but NO Page-name-bearing signals.
+
+    Models the scenario where Professional dashboard, Ads Manager, and Ad Centre
+    are visible, but the composer does NOT say "What's on your mind, <PageName>"
+    and the sidebar has no profile.php?id= link with the Page name.
+    Controls alone should NOT confirm identity.
+    """
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "Facebook"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
+            return None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return None
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        # Composer shows PERSONAL identity, not Page
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, Nathan?"
+            return el
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            return None
+        # Page controls ARE present
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Professional dashboard"
+            return el
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ads Manager"
+            return el
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ad Centre"
+            return el
+        return None
+
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        # profile.php links — check BEFORE navigation (selector may contain both)
+        if "profile.php?id" in sel_lower:
+            return []
+        # No headings with Page name
+        if "h1" in sel_lower or "heading" in sel_lower:
+            return []
+        # Sidebar links: controls but no UnattendedBot8300 identity link
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            return [
+                {"href": "https://www.facebook.com/professional_dashboard/?ref=tab_bar",
+                 "text": "Professional dashboard"},
+                {"href": "https://www.facebook.com/ad_campaign/landing.php",
+                 "text": "Ads Manager"},
+            ]
+        if "aria-label" in sel_lower:
+            return []
+        return []
+
+    def eval_on_selector(selector, expression):
+        if "body" in selector.lower():
+            return ("Professional dashboard\n"
+                    "Ads Manager\n"
+                    "Ad Centre\n"
+                    "What's on your mind, Nathan?\n")
+        return ""
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+    mock_page.eval_on_selector.side_effect = eval_on_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.locator = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    mock_page.get_by_role.return_value.text_content.return_value = "Nathan"
+    return mock_page
+
+
+def _make_profile_php_page():
+    """Mock page: ON the Page profile URL (profile.php?id=...), NOT facebook.com/."""
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/profile.php?id=61594201976549"
+    mock_page.title.return_value = "UnattendedBot8300 - Page"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
+            return None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return None
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, UnattendedBot8300?"
+            return el
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            el = MagicMock()
+            el.text_content.return_value = "UnattendedBot8300"
+            return el
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Professional dashboard"
+            return el
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ads Manager"
+            return el
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ad Centre"
+            return el
+        return None
+
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        expr_lower = (expression or "").lower()
+        # profile.php links — check BEFORE navigation (selector may contain both)
+        if "profile.php?id" in sel_lower and "href" in expr_lower:
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "UnattendedBot8300"},
+            ]
+        if "profile.php?id" in sel_lower and "href" not in expr_lower:
+            return ["UnattendedBot8300"]
+        # Heading extraction: h1, h2, div[role='heading']
+        if "h1" in sel_lower or "heading" in sel_lower:
+            if "div[role='heading']" in sel_lower:
+                return ["unattendedbot8300"]
+            return []
+        # Sidebar navigation links
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            if "href" in expr_lower and "text" in expr_lower:
+                return [
+                    {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                     "text": "unattendedbot8300"},
+                ]
+            return ["UnattendedBot8300"]
+        return []
+
+    def eval_on_selector(selector, expression):
+        if "body" in selector.lower():
+            return ("Manage Page\n"
+                    "UnattendedBot8300\n"
+                    "comment as\n")
+        return ""
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+    mock_page.eval_on_selector.side_effect = eval_on_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.locator = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    mock_page.get_by_role.return_value.text_content.return_value = "UnattendedBot8300"
+    return mock_page
+
+
+def _make_management_ui_only_page():
+    """Mock page: body text contains Page-management UI strings but no real posts.
+
+    Used to prove that the post extraction body-text fallback filters out
+    'Boost Instagram post', 'Manage your business', etc.
+    """
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "Facebook"
+
+    def query_selector(selector):
+        sel_lower = selector.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass", "login_page_link"]):
+            return None
+        if any(k in sel_lower for k in ["checkpoint", "approval", "alert",
+                                         "2fa", "captcha"]):
+            return None
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, UnattendedBot8300?"
+            return el
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            return None
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            return None
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            return None
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            return None
+        return None
+
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        expr_lower = (expression or "").lower()
+        # profile.php links — check BEFORE navigation (selector may contain both)
+        if "profile.php?id" in sel_lower and "href" in expr_lower:
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "unattendedbot8300"},
+            ]
+        if "profile.php?id" in sel_lower and "href" not in expr_lower:
+            return ["UnattendedBot8300"]
+        # Heading extraction
+        if "h1" in sel_lower or "heading" in sel_lower:
+            return []
+        # Sidebar navigation links
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "unattendedbot8300"},
+            ]
+        if "aria-label" in sel_lower and "unattendedbot" in sel_lower:
+            return ["https://www.facebook.com/profile.php?id=61594201976549"]
+        if "role='article'" in sel_lower:
+            return []
+        return []
+
+    def eval_on_selector(selector, expression):
+        if "body" in selector.lower():
+            return ("Boost Instagram post\n"
+                    "Manage your business across Meta apps\n"
+                    "Setup business profile-management\n"
+                    "Professional dashboard\n"
+                    "Ads Manager\n"
+                    "Ad Centre\n"
+                    "What's on your mind, UnattendedBot8300?\n"
+                    "Your profile\n")
+        if "role='article'" in selector.lower():
+            return []
+        return ""
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+    mock_page.eval_on_selector.side_effect = eval_on_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.evaluate = MagicMock()
+    mock_page.locator = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    mock_page.get_by_role.return_value.text_content.return_value = "UnattendedBot8300"
+    return mock_page
+
+
+# ── 1. Page identity confirmed while URL is facebook.com/ (not Page profile) ──
+def test_page_identity_confirmed_on_homefeed_url(temp_config):
+    """Page identity can be confirmed while URL remains facebook.com/ — not
+    necessarily the Page profile URL.
+    The old verification incorrectly required the URL slug to match. The
+    calibrated signals (composer text, sidebar link, Page controls) are
+    sufficient positive evidence.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    result = transport.verify_page_identity("UnattendedBot8300")
+    assert result == IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.close()
+
+
+# ── 2. Composer text contributes positive Page-identity evidence ──
+def test_composer_text_contributes_page_identity_evidence(temp_config):
+    """Composer containing 'What's on your mind, UnattendedBot8300?' contributes
+    positive Page-identity evidence.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    assert transport._detect_page_identity_from_composer("UnattendedBot8300") is True
+    # Negative: a personal-identity composer should NOT match
+    transport._page = _make_personal_mock_page()
+    assert transport._detect_page_identity_from_composer("UnattendedBot8300") is False
+    transport.close()
+
+
+# ── 3. Left-sidebar identity text contributes positive evidence ──
+def test_sidebar_identity_contributes_page_evidence(temp_config):
+    """Left-sidebar Page identity text (with profile.php?id= link) contributes
+    positive Page-identity evidence.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    assert transport._detect_page_identity_from_sidebar("UnattendedBot8300") is True
+    # Personal page: sidebar has no profile.php?id= link with Page name
+    transport._page = _make_personal_mock_page()
+    assert transport._detect_page_identity_from_sidebar("UnattendedBot8300") is False
+    transport.close()
+
+
+# ── 4. Page-specific controls support but do not alone confirm ──
+def test_controls_alone_do_not_confirm_identity(temp_config):
+    """Page-specific controls (Professional dashboard, Ads Manager, Ad Centre)
+    can contribute supporting Page-mode evidence but should NOT by themselves
+    allow an unsafe identity conclusion if the Page name cannot be verified.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_controls_only_page()
+    # Controls ARE present
+    assert transport._detect_page_identity_from_controls("UnattendedBot8300") is True
+    # But full identity verification should NOT confirm (no Page-name signals)
+    result = transport.verify_page_identity("UnattendedBot8300")
+    assert result != IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.close()
+
+
+# ── 5. "Your profile" aria-label is NOT the personal name ──
+def test_your_profile_label_not_personal_name(temp_config):
+    """A top-right 'Your profile' label is NOT interpreted as the personal
+    identity name (e.g. 'Nathan').  It is a generic navigation label.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    active = transport.get_active_facebook_identity()
+    assert active == "UnattendedBot8300"
+    assert active != "Your profile"
+    assert active != "Nathan"
+    transport.close()
+
+
+# ── 6. Successful identity verification prevents fallback to guessed slug ──
+def test_page_identity_prevents_slug_fallback(temp_config):
+    """When Page identity is already confirmed via calibrated signals, the
+    transport does NOT attempt unnecessary fallback navigation to a guessed
+    display-name slug URL.
+
+    In ensure_page_identity, if verify_page_identity already returns CONFIRMED
+    on the first check, switch_to_page_identity is never called.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    with patch.object(transport, "switch_to_page_identity") as mock_switch:
+        result = transport.ensure_page_identity("UnattendedBot8300")
+        assert result == IdentityState.PAGE_IDENTITY_CONFIRMED
+        assert mock_switch.call_count == 0  # no switch attempted
+    transport.close()
+
+
+# ── 7. Display name does NOT imply URL /UnattendedBot8300 ──
+def test_display_name_not_implied_url(temp_config):
+    """Display name 'UnattendedBot8300' does NOT imply URL /UnattendedBot8300.
+
+    The discover_page_url method reads the actual profile.php?id= href from
+    the live DOM, not a guessed slug-based path.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_homefeed_page_identity_active()
+    discovered = transport.discover_page_url()
+    assert discovered is not None
+    assert "profile.php?id=61594201976549" in discovered
+    # Must NOT be the guessed slug URL
+    assert "/UnattendedBot8300" not in discovered
+    transport.close()
+
+
+# ── 8. profile.php?id= URL accepted independently of Graph API Page ID ──
+def test_profile_php_url_independent_of_graph_api_id(temp_config):
+    """A discovered profile.php?id=... Page URL is accepted independently of
+    the Graph API FACEBOOK_PAGE_ID.
+
+    The camoufox transport navigates to the discovered URL regardless of the
+    numeric Graph API Page ID stored in config.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_id="1234567890",  # numeric Graph API ID — irrelevant for camoufox
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+        )
+        transport = CamoufoxTransport(config)
+        transport._page = _make_profile_php_page()
+        discovered = transport.discover_page_url()
+        assert discovered is not None
+        assert "profile.php?id=" in discovered
+        # The camoufox _page_url() uses config URL, not Graph API ID
+        assert "1234567890" not in transport._page_url()
+        transport.close()
+
+
+# ── 9. Post extraction rejects Page-management UI strings ──
+def test_post_extraction_rejects_management_ui(temp_config):
+    """Post extraction rejects known Page-management/setup UI strings such as
+    'Boost Instagram post', 'Manage your business', etc.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_management_ui_only_page()
+    posts = transport._extract_posts_from_body_text()
+    # Should find zero real posts — all content was UI fragments
+    for p in posts:
+        msg_lower = p.message.lower()
+        assert "boost instagram" not in msg_lower
+        assert "manage your business" not in msg_lower
+        assert "setup business" not in msg_lower
+        assert "professional dashboard" not in msg_lower
+        assert "ads manager" not in msg_lower
+        assert "ad centre" not in msg_lower
+        assert "what's on your mind" not in msg_lower
+        assert "your profile" not in msg_lower
+    transport.close()
+
+
+# ── 10. Post extraction keeps genuine Page timeline text ──
+def test_post_extraction_keeps_genuine_posts(temp_config):
+    """Post extraction keeps genuine Page timeline text when present in body.
+
+    When body text contains real post content alongside UI fragments, those
+    posts are captured and UI fragments are filtered.
+    """
+    transport = CamoufoxTransport(temp_config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "Facebook"
+
+    def query_selector(s):
+        sel_lower = s.lower()
+        if any(k in sel_lower for k in ["login_form", "email", "pass",
+                                         "login_page_link", "checkpoint",
+                                         "approval", "alert", "2fa", "captcha"]):
+            return None
+        if "auth_profile_menu" in sel_lower or "profile" in sel_lower:
+            el = MagicMock()
+            el.get_attribute.return_value = "Your profile"
+            return el
+        if "auth_home_link" in sel_lower:
+            return MagicMock()
+        if "auth_watch_link" in sel_lower:
+            return MagicMock()
+        if "auth_feed_composer" in sel_lower:
+            return MagicMock()
+        if "page_composer_region" in sel_lower or "create a post" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Create a postWhat's on your mind, UnattendedBot8300?"
+            return el
+        if "page_header_title" in sel_lower or sel_lower == "h1":
+            return None
+        if "page_control_professional_dashboard" in sel_lower or "professional_dashboard" in sel_lower or "professional dashboard" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Professional dashboard"
+            return el
+        if "page_control_ads_manager" in sel_lower or "ads_manager" in sel_lower or "ad_campaign" in sel_lower or "ads manager" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ads Manager"
+            return el
+        if "page_control_ad_centre" in sel_lower or "ad_center" in sel_lower or "ad centre" in sel_lower:
+            el = MagicMock()
+            el.text_content.return_value = "Ad Centre"
+            return el
+        return None
+
+    def eval_on_selector_all(selector, expression):
+        sel_lower = selector.lower()
+        expr_lower = (expression or "").lower()
+        # profile.php links — check BEFORE navigation
+        if "profile.php?id" in sel_lower and "href" in expr_lower:
+            return [
+                {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                 "text": "unattendedbot8300"},
+            ]
+        if "profile.php?id" in sel_lower and "href" not in expr_lower:
+            return ["UnattendedBot8300"]
+        # Heading extraction
+        if "h1" in sel_lower or "heading" in sel_lower:
+            return []
+        # Sidebar navigation links
+        if "div[role='navigation'] a" in sel_lower or ("navigation" in sel_lower and "a" in sel_lower):
+            if "href" in expr_lower and "text" in expr_lower:
+                return [
+                    {"href": "https://www.facebook.com/profile.php?id=61594201976549",
+                     "text": "unattendedbot8300"},
+                ]
+            return ["UnattendedBot8300"]
+        if "aria-label" in selector.lower() and "unattendedbot" in selector.lower():
+            return ["https://www.facebook.com/profile.php?id=61594201976549"]
+        if "role='article'" in selector.lower():
+            return []
+        return []
+
+    body_text = (
+        "What's on your mind, UnattendedBot8300?\n"
+        "Professional dashboard\n"
+        "Ads Manager\n"
+        "Ad Centre\n"
+        "Your profile\n"
+        "This is a genuine post about my latest AI experiment.\n"
+        "Another real post about autonomous agent workflows.\n"
+        "Boost Instagram post\n"
+        "Manage your business across Meta apps\n"
+        "Setup business profile-management\n"
+    )
+
+    def eval_on_selector(selector, expression):
+        if "body" in selector.lower():
+            return body_text
+        return ""
+
+    mock_page.query_selector.side_effect = query_selector
+    mock_page.eval_on_selector_all.side_effect = eval_on_selector_all
+    mock_page.eval_on_selector.side_effect = eval_on_selector
+    mock_page.wait_for_load_state = MagicMock()
+    mock_page.goto = MagicMock()
+    mock_page.wait_for_timeout = MagicMock()
+    mock_page.evaluate = MagicMock()
+    mock_page.locator = MagicMock()
+    mock_page.wait_for_function = MagicMock()
+    mock_page.wait_for_selector = MagicMock()
+    mock_page.get_by_role.return_value.text_content.return_value = "UnattendedBot8300"
+    transport._page = mock_page
+
+    posts = transport._extract_posts_from_body_text()
+    messages = [p.message for p in posts]
+    # Should contain the genuine posts
+    assert any("genuine post about my latest AI experiment" in m for m in messages)
+    assert any("real post about autonomous agent workflows" in m for m in messages)
+    # Should NOT contain UI fragments
+    for m in messages:
+        m_lower = m.lower()
+        assert "boost instagram" not in m_lower
+        assert "manage your business" not in m_lower
+        assert "setup business" not in m_lower
+        assert "professional dashboard" not in m_lower
+        assert "what's on your mind" not in m_lower
+        assert "your profile" not in m_lower
+    transport.close()
+
+
+# ── 11. No visible comments returns empty list, not SelectorError ──
+def test_no_visible_comments_returns_empty_not_error(temp_config):
+    """When no comments are visible on a post, _extract_comments returns an
+    empty list — NOT a SelectorError.
+
+    Not all posts have visible comments; absence is not a selector failure.
+    """
+    transport = CamoufoxTransport(temp_config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.facebook.com/"
+    mock_page.title.return_value = "Facebook"
+    mock_page.locator.return_value.all.return_value = []
+    transport._page = mock_page
+    post_obs = PostObservation(
+        fb_post_id="test_post_1",
+        message="test post",
+        created_time="2026-01-01T00:00:00Z",
+        posted_by_page=True,
+    )
+    result = transport._extract_comments(post_obs)
+    assert result == []
+    assert isinstance(result, list)
+    transport.close()
+
+
+# ── 12. dry_run guarantees zero writes ──
+def test_dry_run_zero_writes_guarantee(temp_config):
+    """dry_run mode guarantees zero Facebook writes — both publish and reply
+    are blocked at the preflight level before any browser action.
+    """
+    transport = CamoufoxTransport(temp_config)
+    assert temp_config.unattended_bot_mode == "dry_run"
+    transport._page = _make_authed_mock_page()
+    transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.verify_page_identity = lambda name=None: IdentityState.PAGE_IDENTITY_CONFIRMED
+    with patch.object(transport, "_extract_posts", side_effect=AssertionError("should not reach")):
+        with pytest.raises(TransportError, match="dry_run"):
+            transport.publish_text_status("SHOULD NOT HAPPEN")
+        with pytest.raises(TransportError, match="dry_run"):
+            transport.reply_to_comment("c1", "SHOULD NOT HAPPEN")
+    transport.close()
+
+
+# ── 13. Personal / unknown identity blocks all write preflight ──
+def test_personal_identity_blocks_all_writes(temp_config):
+    """Personal identity (or unknown) blocks ALL write preflight attempts.
+
+    When verify_page_identity returns PERSONAL_IDENTITY_ACTIVE,
+    IDENTITY_UNKNOWN, or PAGE_SWITCH_FAILED, both publish_text_status and
+    reply_to_comment must raise TransportError with 'Write blocked'.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = Config(
+            facebook_page_id="UnattendedBot8300",
+            facebook_transport="camoufox_ui",
+            database_path=str(Path(tmpdir) / "test.db"),
+            project_root=Path(tmpdir),
+            camoufox_profile_dir=str(Path(tmpdir) / "bp"),
+            unattended_bot_mode="live",  # bypass dry_run to test identity gate
+        )
+        transport = CamoufoxTransport(config)
+        transport._page = _make_authed_mock_page()
+        # Personal identity
+        transport.ensure_page_identity = lambda name=None: IdentityState.PERSONAL_IDENTITY_ACTIVE
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.publish_text_status("test")
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.reply_to_comment("c1", "test")
+        # Unknown identity
+        transport.ensure_page_identity = lambda name=None: IdentityState.IDENTITY_UNKNOWN
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.publish_text_status("test")
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.reply_to_comment("c1", "test")
+        # Page switch failed
+        transport.ensure_page_identity = lambda name=None: IdentityState.PAGE_SWITCH_FAILED
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.publish_text_status("test")
+        with pytest.raises(TransportError, match="Write blocked"):
+            transport.reply_to_comment("c1", "test")
+        transport.close()
+
+
+# ── Additional: profile.php URL is accepted as a positive identity signal ──
+def test_profile_php_url_accepted_as_identity_signal(temp_config):
+    """When already on a profile.php?id= URL, verify_page_identity confirms
+    identity using URL + heading + link signals (2+ positive signals).
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_profile_php_page()
+    result = transport.verify_page_identity("UnattendedBot8300")
+    assert result == IdentityState.PAGE_IDENTITY_CONFIRMED
+    transport.close()
+
+
+# ── Additional: controls-only page returns IDENTITY_UNKNOWN, not CONFIRMED ──
+def test_controls_only_returns_unknown_not_confirmed(temp_config):
+    """When only Page controls are visible (no Page-name-bearing composer,
+    sidebar link, or heading), verify_page_identity returns IDENTITY_UNKNOWN
+    — not PAGE_IDENTITY_CONFIRMED.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_controls_only_page()
+    result = transport.verify_page_identity("UnattendedBot8300")
+    assert result != IdentityState.PAGE_IDENTITY_CONFIRMED
+    assert result == IdentityState.IDENTITY_UNKNOWN
+    transport.close()
+
+
+# ── Additional: "Your profile" aria-label on the personal page ──
+def test_personal_identity_label_is_not_page_name(temp_config):
+    """When the personal profile is active, get_active_facebook_identity must
+    return the personal name (or empty), not 'Your profile' as a name.
+    The 'Your profile' label is a UI navigation element, not an identity.
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_personal_mock_page()
+    identity = transport.get_active_facebook_identity()
+    assert identity != "Your profile"
+    assert identity != "UnattendedBot8300"
+    transport.close()
+
+
+# ── Additional: discover_page_url returns None on personal identity ──
+def test_discover_page_url_returns_none_on_personal(temp_config):
+    """discover_page_url returns None when the Page identity is NOT confirmed
+    and no profile.php?id= link is present (personal identity).
+    """
+    transport = CamoufoxTransport(temp_config)
+    transport._page = _make_personal_mock_page()
+    result = transport.discover_page_url()
+    assert result is None
+    transport.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
